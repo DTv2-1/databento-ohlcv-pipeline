@@ -87,7 +87,14 @@ python scripts/fetch_1s_bars.py \
   --start 2024-01-01 \
   --end 2024-12-31
 
-# For CME Futures (ES, NQ, etc.) - use specific contract
+# For CME Futures - Continuous Contract (auto-rolls, front month)
+python scripts/fetch_1s_bars.py \
+  --symbol ES.v.0 \
+  --dataset GLBX.MDP3 \
+  --start 2024-01-01 \
+  --end 2024-12-31
+
+# For CME Futures - Specific Contract
 python scripts/fetch_1s_bars.py \
   --symbol ESH24 \
   --dataset GLBX.MDP3 \
@@ -96,7 +103,10 @@ python scripts/fetch_1s_bars.py \
 ```
 
 **Parameters:**
-- `--symbol`: Trading symbol (e.g., SPY, AAPL for equities; ESH24, NQM24 for futures)
+- `--symbol`: Trading symbol
+  - Equities: SPY, AAPL, QQQ, etc.
+  - Futures (continuous): ES.v.0, NQ.v.0, GC.v.0 (front month, auto-rolls)
+  - Futures (specific): ESH24, NQM24, etc.
 - `--dataset`: Databento dataset (DBEQ.BASIC for equities, GLBX.MDP3 for CME futures)
 - `--start`: Start date (YYYY-MM-DD)
 - `--end`: End date (YYYY-MM-DD)
@@ -244,6 +254,35 @@ Validate without timeframe alignment check:
 python scripts/validate_bars.py \
   --input_dir data/raw_1s/ES
 ```
+
+---
+
+## ⚙️ Important Technical Details
+
+### Timezone
+- **All timestamps are in UTC**
+- Databento returns all data in UTC regardless of exchange
+- No timezone conversion is needed for aggregation
+- To convert to exchange local time, use pandas `.tz_convert()`
+
+### Data Gaps
+- **1-second data contains gaps** (seconds with no trades are omitted by Databento)
+- This is normal for market data - only active seconds are included
+- Example: SPY has ~89% missing seconds (only ~11% have trades)
+- **Aggregation handles gaps correctly** using pandas resample with proper OHLCV rules:
+  - `open`: First value in period
+  - `high`: Maximum value in period
+  - `low`: Minimum value in period
+  - `close`: Last value in period
+  - `volume`: Sum of all values in period
+- No forward-filling is applied - aggregated bars only contain data from actual trades
+
+### Performance & Memory
+- **Processing**: File-by-file (one month at a time)
+- **Memory**: One month of 1s data typically uses ~50-200 MB RAM
+- **Disk**: ~1-5 MB per month for most symbols (compressed CSV)
+- **Very liquid symbols** (ES, NQ during RTH) may use more memory
+- For multi-year processing, the pipeline automatically iterates month-by-month
 
 ---
 

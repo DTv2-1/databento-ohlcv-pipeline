@@ -28,15 +28,15 @@ class OHLCVAggregator:
     
     # Map de timeframes legibles a pandas frequency
     TIMEFRAME_MAP = {
-        '15s': '15S',
-        '30s': '30S',
-        '45s': '45S',
-        '1min': '1T',
-        '2min': '2T',
-        '5min': '5T',
-        '15min': '15T',
-        '30min': '30T',
-        '1h': '1H',
+        '15s': '15s',
+        '30s': '30s',
+        '45s': '45s',
+        '1min': '1min',
+        '2min': '2min',
+        '5min': '5min',
+        '15min': '15min',
+        '30min': '30min',
+        '1h': '1h',
     }
     
     def __init__(self):
@@ -84,10 +84,14 @@ class OHLCVAggregator:
             # Resample
             resampled = df.resample(freq, label='left', closed='left').agg(agg_rules)
             
+            # Count empty periods before dropping
+            empty_periods = resampled['open'].isna().sum()
+            
             # Eliminar filas con NaN (períodos sin datos)
             resampled = resampled.dropna()
             
-            logger.debug(f"Resampled to {timeframe}: {len(df)} → {len(resampled)} rows")
+            logger.debug(f"Resampled to {timeframe}: {len(df)} → {len(resampled)} rows "
+                        f"({empty_periods} empty periods dropped)")
             
             return resampled
             

@@ -1,6 +1,13 @@
 """
 Databento 1-Second OHLCV Downloader
 Downloads monthly OHLCV data from Databento API with resume capability
+
+Supports:
+- Individual contracts: ESH24, NQM24, etc.
+- Continuous contracts: ES.v.0, NQ.v.0, GC.v.0 (front month, auto-rolls)
+- Equities: SPY, QQQ, AAPL, etc.
+
+Timezone: All timestamps are in UTC
 """
 
 import os
@@ -87,6 +94,11 @@ class DatabentoDownloader:
             logger.info(f"Downloading {symbol} for {year}-{month:02d}...")
             logger.info(f"Date range: {start.date()} to {end.date()}")
             
+            # Detect continuous contracts (e.g., ES.v.0, NQ.v.0)
+            stype_in = 'continuous' if '.v.' in symbol else 'raw_symbol'
+            if stype_in == 'continuous':
+                logger.info(f"Detected continuous contract: {symbol}")
+            
             # Hacer request a Databento
             data = self.client.timeseries.get_range(
                 dataset=self.dataset,
@@ -94,6 +106,7 @@ class DatabentoDownloader:
                 schema='ohlcv-1s',
                 start=start.isoformat(),
                 end=end.isoformat(),
+                stype_in=stype_in,
             )
             
             # Convertir a DataFrame

@@ -12,3 +12,4 @@ __pycache__/
 .vscode/
 venv/
 .env.example
+JK_FEEDBACK_RESPONSE.md
