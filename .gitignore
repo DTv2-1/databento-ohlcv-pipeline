@@ -11,5 +11,10 @@ __pycache__/
 .idea/
 .vscode/
 venv/
-.env.example
 JK_FEEDBACK_RESPONSE.md
+
+# Video downloader output - ignore contents but keep folder structure
+video_downloader/output/**
+!video_downloader/output/.gitkeep
+!video_downloader/output/*/
+!video_downloader/output/*/.gitkeep
