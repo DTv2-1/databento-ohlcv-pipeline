@@ -145,7 +145,158 @@ class SeleniumCourseDownloader:
         self.captured_video_ids = set()  # Track already captured video IDs
         self.output_dir = OUTPUT_DIR  # Directory to save files
         self.driver = None
+        self.active_downloads = {}  # Track active downloads {filename: thread}
+        self.max_parallel_downloads = 3  # Maximum parallel downloads
+        self.checkpoint_file = Path("../output/logs/checkpoint.json")
+        self.batch_size = 3  # Process 3 lessons per browser session
         self.setup_driver()
+    
+    def save_checkpoint(self, course_index, category_number, lesson_number):
+        """Save current progress"""
+        checkpoint = {
+            'course_index': course_index,
+            'category_number': category_number,
+            'lesson_number': lesson_number,
+            'completed_video_ids': list(self.captured_video_ids),
+            'timestamp': time.time()
+        }
+        with open(self.checkpoint_file, 'w') as f:
+            json.dump(checkpoint, f, indent=2)
+        print(f"   💾 Checkpoint saved: Course {course_index}, Cat {category_number}, Lesson {lesson_number}")
+    
+    def load_checkpoint(self):
+        """Load previous progress"""
+        if self.checkpoint_file.exists():
+            try:
+                with open(self.checkpoint_file, 'r') as f:
+                    checkpoint = json.load(f)
+                self.captured_video_ids = set(checkpoint.get('completed_video_ids', []))
+                print(f"   📂 Checkpoint loaded: {len(self.captured_video_ids)} videos already processed")
+                return checkpoint
+            except:
+                pass
+        return None
+    
+    def wait_for_downloads(self):
+        """Wait for all active downloads to complete"""
+        if not self.active_downloads:
+            return
+        
+        print(f"\n⏳ Waiting for {len(self.active_downloads)} downloads to complete...")
+        
+        while self.active_downloads:
+            time.sleep(5)
+            # Check finished downloads
+            finished = [fn for fn, thread in self.active_downloads.items() if not thread.is_alive()]
+            for fn in finished:
+                print(f"   ✅ Completed: {fn}")
+                del self.active_downloads[fn]
+            
+            if self.active_downloads:
+                print(f"   ⏳ Still downloading: {len(self.active_downloads)} videos...")
+        
+        print("✅ All downloads completed!\n")
+    
+    def close_driver(self):
+        """Close browser and clean up driver"""
+        if self.driver:
+            try:
+                print("\n🔄 Closing browser...")
+                self.driver.quit()
+                self.driver = None
+                print("   ✅ Browser closed")
+            except Exception as e:
+                print(f"   ⚠️  Error closing browser: {e}")
+    
+    def reopen_driver(self):
+        """Reopen browser with fresh session"""
+        print("\n🔄 Reopening browser with fresh session...")
+        self.setup_driver()
+        print("   ✅ Fresh browser ready")
+    
+    def process_course_in_batches(self, course_index, course_url, course_name):
+        """Process a course in batches with browser restart every N lessons
+        
+        Args:
+            course_index: Course number
+            course_url: URL of the course
+            course_name: Name of the course
+        """
+        print(f"\n{'='*80}")
+        print(f"📚 COURSE #{course_index + 1}: {course_name}")
+        print(f"🔗 {course_url}")
+        print(f"{'='*80}")
+        
+        # Load checkpoint if exists
+        checkpoint = self.load_checkpoint()
+        if checkpoint and checkpoint.get('course_index') == course_index:
+            start_category = checkpoint.get('category_number', 1)
+            start_lesson = checkpoint.get('lesson_number', 0)
+            print(f"\n📍 Resuming from checkpoint: Cat {start_category}, Lesson {start_lesson + 1}")
+        else:
+            start_category = 1
+            start_lesson = 0
+            print(f"\n🆕 Starting fresh: Cat {start_category}, Lesson {start_lesson + 1}")
+        
+        batch_number = 0
+        
+        while True:
+            batch_number += 1
+            print(f"\n{'='*80}")
+            print(f"🎯 BATCH #{batch_number} - Processing up to {self.batch_size} lessons")
+            print(f"   Starting from: Cat {start_category}, Lesson {start_lesson + 1}")
+            print(f"{'='*80}")
+            
+            # Navigate to course
+            print(f"\n🌐 Navigating to course...")
+            self.driver.get(course_url)
+            time.sleep(5)
+            
+            # Reset batch counter
+            self.lessons_processed_this_batch = 0
+            
+            # Process batch
+            self.find_videos(
+                course_index=course_index,
+                course_name=course_name,
+                start_category=start_category,
+                start_lesson=start_lesson,
+                max_lessons=self.batch_size
+            )
+            
+            # Check if we processed any lessons
+            lessons_this_batch = self.lessons_processed_this_batch
+            if lessons_this_batch == 0:
+                print("\n✅ No more lessons to process - course complete!")
+                break
+            
+            print(f"\n✅ Batch completed: {lessons_this_batch} lessons processed")
+            
+            # Update position for next batch
+            start_lesson += lessons_this_batch
+            
+            # Save checkpoint with current position
+            self.save_checkpoint(course_index, start_category, start_lesson)
+            print(f"💾 Checkpoint saved: Cat {start_category}, Lesson {start_lesson + 1}")
+            
+            # Wait for all downloads to complete
+            self.wait_for_downloads()
+            
+            # Close browser
+            self.close_driver()
+            
+            # Sleep before reopening (avoid rate limiting)
+            print("\n😴 Sleeping 10 seconds before next batch...")
+            time.sleep(10)
+            
+            # Reopen browser
+            self.reopen_driver()
+            
+            # Login again
+            print("\n🔐 Logging in...")
+            self.login()
+            
+            print(f"\n🔄 Ready for next batch\n")
         
     def setup_driver(self):
         """Configure Chrome driver"""
@@ -154,24 +305,44 @@ class SeleniumCourseDownloader:
         options = webdriver.ChromeOptions()
         
         if self.headless:
-            options.add_argument('--headless')
+            options.add_argument('--headless=new')  # New headless mode (more stable)
+            options.add_argument('--window-size=1920,1080')  # Set window size in headless
         
         # Options for better performance and compatibility
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-dev-shm-usage')
         options.add_argument('--disable-blink-features=AutomationControlled')
-        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_argument('--disable-gpu')  # Disable GPU in headless
+        options.add_argument('--disable-software-rasterizer')
+        options.add_argument('--disable-extensions')
+        options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
         options.add_experimental_option('useAutomationExtension', False)
         
         # Enable network logs to capture requests
         options.set_capability('goog:loggingPrefs', {'performance': 'ALL'})
         
-        # User agent
+        # User agent (realistic)
         options.add_argument('user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+        
+        # Add preferences to avoid detection
+        prefs = {
+            'profile.default_content_setting_values.notifications': 2,
+            'profile.default_content_settings.popups': 0,
+        }
+        options.add_experimental_option('prefs', prefs)
         
         try:
             self.driver = webdriver.Chrome(options=options)
             self.driver.set_page_load_timeout(30)
+            
+            # Execute JavaScript to hide webdriver property
+            self.driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
+                'source': '''
+                    Object.defineProperty(navigator, 'webdriver', {
+                        get: () => undefined
+                    });
+                '''
+            })
             
             # Activate Chrome DevTools Protocol to capture network requests
             self.driver.execute_cdp_cmd('Network.enable', {})
@@ -182,6 +353,124 @@ class SeleniumCourseDownloader:
             print("\nMake sure you have ChromeDriver installed:")
             print("  brew install chromedriver")
             raise
+    
+    def export_cookies_for_ytdlp(self):
+        """Export cookies in Netscape format for yt-dlp"""
+        try:
+            cookies = self.driver.get_cookies()
+            cookies_file = Path("../output/logs/cookies.txt")
+            
+            with open(cookies_file, 'w') as f:
+                # Netscape HTTP Cookie File header
+                f.write("# Netscape HTTP Cookie File\n")
+                f.write("# This file was generated by Selenium\n\n")
+                
+                for cookie in cookies:
+                    # Netscape format: domain, flag, path, secure, expiration, name, value
+                    domain = cookie.get('domain', '')
+                    flag = 'TRUE' if domain.startswith('.') else 'FALSE'
+                    path = cookie.get('path', '/')
+                    secure = 'TRUE' if cookie.get('secure', False) else 'FALSE'
+                    expiry = cookie.get('expiry', 0)
+                    name = cookie.get('name', '')
+                    value = cookie.get('value', '')
+                    
+                    f.write(f"{domain}\t{flag}\t{path}\t{secure}\t{expiry}\t{name}\t{value}\n")
+            
+            print(f"   ✅ Cookies exported to {cookies_file}")
+        except Exception as e:
+            print(f"   ⚠️  Could not export cookies: {e}")
+    
+    def download_video_with_selenium_session(self, m3u8_url, filename):
+        """Download HLS video using requests with Selenium cookies/headers"""
+        try:
+            import subprocess
+            import threading
+            
+            # Wait if too many downloads active
+            while len(self.active_downloads) >= self.max_parallel_downloads:
+                # Clean up finished downloads
+                finished = [fn for fn, thread in self.active_downloads.items() if not thread.is_alive()]
+                for fn in finished:
+                    print(f"         ✅ Completed: {fn}")
+                    del self.active_downloads[fn]
+                
+                if len(self.active_downloads) >= self.max_parallel_downloads:
+                    time.sleep(2)
+            
+            # Create requests session with Selenium cookies
+            session = requests.Session()
+            
+            # Copy all cookies from Selenium
+            selenium_cookies = self.driver.get_cookies()
+            for cookie in selenium_cookies:
+                session.cookies.set(cookie['name'], cookie['value'], domain=cookie.get('domain'))
+            
+            # Set headers matching Selenium browser
+            session.headers.update({
+                'User-Agent': self.driver.execute_script("return navigator.userAgent;"),
+                'Accept': '*/*',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': self.driver.current_url,
+                'Origin': 'https://members.marczellklein.com'
+            })
+            
+            output_path = Path(f"../output/videos/{filename}")
+            log_file = Path(f"../output/videos/{filename}.log")
+            
+            # Download using yt-dlp with custom cookies (via --add-header)
+            # We'll pass the session cookies as a file
+            cookies_temp = Path(f"../output/logs/temp_cookies_{filename}.txt")
+            with open(cookies_temp, 'w') as f:
+                f.write("# Netscape HTTP Cookie File\n\n")
+                for cookie in selenium_cookies:
+                    domain = cookie.get('domain', '')
+                    flag = 'TRUE' if domain.startswith('.') else 'FALSE'
+                    path = cookie.get('path', '/')
+                    secure = 'TRUE' if cookie.get('secure', False) else 'FALSE'
+                    expiry = cookie.get('expiry', 0)
+                    name = cookie.get('name', '')
+                    value = cookie.get('value', '')
+                    f.write(f"{domain}\t{flag}\t{path}\t{secure}\t{expiry}\t{name}\t{value}\n")
+            
+            # Launch yt-dlp in background with cookies and custom headers
+            def run_download():
+                try:
+                    with open(log_file, 'w') as log:
+                        user_agent = self.driver.execute_script("return navigator.userAgent;")
+                        referer = self.driver.current_url
+                        
+                        subprocess.run([
+                            "yt-dlp",
+                            m3u8_url,
+                            "-o", str(output_path),
+                            "--cookies", str(cookies_temp),
+                            "--add-header", f"User-Agent: {user_agent}",
+                            "--add-header", f"Referer: {referer}",
+                            "--add-header", "Origin: https://members.marczellklein.com",
+                            "--no-check-certificate",
+                            "-f", "best",
+                            "--merge-output-format", "mp4",
+                            "--concurrent-fragments", "3"
+                        ], stdout=log, stderr=subprocess.STDOUT)
+                finally:
+                    # Clean up temp cookies
+                    try:
+                        cookies_temp.unlink()
+                    except:
+                        pass
+            
+            # Start download in background thread
+            download_thread = threading.Thread(target=run_download, daemon=True)
+            download_thread.start()
+            
+            # Track active download
+            self.active_downloads[filename] = download_thread
+            
+            print(f"         ⬇️  Download started: {filename} ({len(self.active_downloads)}/{self.max_parallel_downloads} active)")
+            
+        except Exception as e:
+            print(f"         ❌ Download error: {str(e)[:60]}")
     
     def login(self):
         """Authenticate on the site"""
@@ -321,6 +610,10 @@ class SeleniumCourseDownloader:
             
             # If no explicit error, assume it worked
             print("✅ Login completed (no errors detected)")
+            
+            # Export cookies for yt-dlp
+            self.export_cookies_for_ytdlp()
+            
             return True
             
         except Exception as e:
@@ -518,11 +811,21 @@ class SeleniumCourseDownloader:
             print(f"❌ Error navigating to course: {e}")
             return False, None
     
-    def find_videos(self, course_index=0):
-        """Find all videos on current course page"""
-        print("\n🔍 Navigating through course playlist...")
+    def find_videos(self, course_index=0, course_name="Unknown", start_category=1, start_lesson=0, max_lessons=None):
+        """Find videos on current course page - supports batch processing
+        
+        Args:
+            course_index: Course number
+            course_name: Name of the course
+            start_category: Category to start from (1-indexed)
+            start_lesson: Lesson to start from in that category (0-indexed)
+            max_lessons: Maximum lessons to process before returning (None = all)
+        """
+        print(f"\n🔍 Navigating through course playlist (from Cat {start_category}, Lesson {start_lesson+1})...")
         
         all_videos_urls = []
+        self.current_course_name = course_name  # Save for later use
+        self.lessons_processed_this_batch = 0  # Counter for batch
         
         # Wait for page to load
         time.sleep(5)
@@ -659,8 +962,29 @@ class SeleniumCourseDownloader:
         category_count = 0
         max_categories = 50
         
+        # Navigate to start_category if needed
+        if start_category > 1:
+            print(f"⏩ Fast-forwarding to category {start_category}...")
+            for _ in range(start_category - 1):
+                try:
+                    next_button = self.driver.find_element(By.XPATH, next_button_xpath)
+                    if next_button.is_enabled():
+                        self.driver.execute_script("arguments[0].click();", next_button)
+                        time.sleep(3)
+                    else:
+                        break
+                except:
+                    break
+            category_count = start_category - 1
+        
         while category_count < max_categories:
             category_count += 1
+            
+            # Check if we've hit max_lessons limit
+            if max_lessons is not None and self.lessons_processed_this_batch >= max_lessons:
+                print(f"\n✅ Batch limit reached ({max_lessons} lessons processed)")
+                break
+            
             print(f"\n📚 Processing CATEGORY #{category_count}...")
             
             # Wait for page to stabilize
@@ -791,11 +1115,22 @@ class SeleniumCourseDownloader:
                 # 5. Iterate over each lesson in the playlist
                 lessons_processed = 0
                 lessons_with_content = 0
+                lesson_urls = []  # Initialize here to avoid variable error
                 
                 for idx, item in enumerate(playlist_items, 1):
+                    # Check batch limit
+                    if max_lessons is not None and self.lessons_processed_this_batch >= max_lessons:
+                        print(f"      ✅ Batch limit reached, stopping at lesson {lessons_processed}")
+                        break
+                    
                     # Limit to the number of lessons in the category
                     if lessons_processed >= total_lessons_in_category:
                         break
+                    
+                    # Skip lessons before start_lesson if we're in start_category
+                    if category_count == start_category and lessons_processed < start_lesson:
+                        lessons_processed += 1
+                        continue
                     
                     try:
                         item_id = item.get_attribute('id')
@@ -929,6 +1264,62 @@ class SeleniumCourseDownloader:
                                 print(f"         ▶️  Playback started ({play_result})")
                                 time.sleep(8)  # Esperar carga del HLS
                                 
+                                # 🚀 CAPTURE FROM DOM IMMEDIATELY (headless-compatible)
+                                try:
+                                    dom_urls = self.extract_video_from_dom()
+                                    output_file = os.path.join(LOGS_DIR, 'all_m3u8_urls.txt')
+                                    metadata_file = os.path.join(LOGS_DIR, 'video_metadata.jsonl')
+                                    
+                                    # CRITICAL: Only capture THE FIRST new URL for THIS lesson
+                                    captured_this_lesson = 0
+                                    for url in dom_urls:
+                                        if captured_this_lesson > 0:
+                                            break  # Only capture 1 URL per lesson
+                                            
+                                        if 'master.m3u8' in url and 'token=' in url:
+                                            video_id = url.split('/videos/')[-1].split('_')[0] if '/videos/' in url else url.split('/')[-1][:36]
+                                            
+                                            # Only add if BOTH url AND video_id are new
+                                            if url not in seen_urls_in_category and video_id not in self.captured_video_ids:
+                                                seen_urls_in_category.add(url)
+                                                self.captured_video_ids.add(video_id)
+                                                
+                                                # WRITE IMMEDIATELY
+                                                with open(output_file, 'a', encoding='utf-8') as f:
+                                                    f.write(f"{url}\n")
+                                                    f.flush()
+                                                
+                                                import json
+                                                with open(metadata_file, 'a', encoding='utf-8') as f:
+                                                    metadata = {
+                                                        'url': url,
+                                                        'course': getattr(self, 'current_course_name', 'Unknown'),
+                                                        'category': category_count,
+                                                        'lesson': lessons_processed
+                                                    }
+                                                    f.write(json.dumps(metadata, ensure_ascii=False) + '\n')
+                                                    f.flush()
+                                                
+                                                print(f"         🚀 URL captured → download starting NOW")
+                                                
+                                                # Download immediately with Selenium session
+                                                course_name = getattr(self, 'current_course_name', 'Unknown').replace('/', '-').replace(' ', '_')
+                                                filename = f"{course_name}_Cat{category_count:02d}_Lesson{lessons_processed:02d}.mp4"
+                                                self.download_video_with_selenium_session(url, filename)
+                                                
+                                                lesson_urls.append({'url': url, 'type': 'video', 'video_id': video_id})
+                                                captured_this_lesson += 1
+                                                self.lessons_processed_this_batch += 1
+                                    
+                                    if captured_this_lesson > 0:
+                                        print(f"         ✅ Captured URL for this lesson")
+                                    elif dom_urls:
+                                        print(f"         ℹ️  Found {len(dom_urls)} URLs but all already captured")
+                                    else:
+                                        print(f"         ⚠️  No URLs found in DOM")
+                                except Exception as ex:
+                                    print(f"         ❌ DOM extraction error: {str(ex)[:40]}")
+                                
                                 # Pausar
                                 self.driver.execute_script("""
                                     var playBtn = document.querySelector('.plyr__control[data-plyr="play"]');
@@ -945,33 +1336,7 @@ class SeleniumCourseDownloader:
                             print(f"         ℹ️  Capturing without playback")
                             time.sleep(5)
                         
-                        # Capture URLs from performance logs after playback
-                        # DO NOT use self.get_network_logs() because it filters globally
-                        # Capture directly without global filtering
-                        lesson_urls = []
-                        try:
-                            logs = self.driver.get_log('performance')
-                            for entry in logs:
-                                try:
-                                    log = json.loads(entry['message'])['message']
-                                    if log['method'] == 'Network.responseReceived':
-                                        url = log['params']['response']['url']
-                                        # Only master.m3u8 with token
-                                        if 'master.m3u8' in url and 'token=' in url:
-                                            video_id = url.split('/videos/')[-1].split('_')[0] if '/videos/' in url else url.split('/')[-1][:36]
-                                            # Filter only by URLs seen IN THIS CATEGORY
-                                            if url not in seen_urls_in_category:
-                                                lesson_urls.append({
-                                                    'url': url,
-                                                    'type': 'video',
-                                                    'video_id': video_id
-                                                })
-                                                seen_urls_in_category.add(url)
-                                                self.captured_video_ids.add(video_id)
-                                except:
-                                    continue
-                        except:
-                            pass
+                        # lesson_urls ya tiene las URLs capturadas después del playback
                         
                         if lesson_urls:
                             videos = [u for u in lesson_urls if u['type'] == 'video']
@@ -981,14 +1346,6 @@ class SeleniumCourseDownloader:
                                 print(f"         ✅ {len(videos)} video(s) + {len(audios)} audio(s)")
                                 all_videos_urls.extend(lesson_urls)
                                 lessons_with_content += 1
-                                
-                                # 🚀 WRITE IMMEDIATELY to file for async download
-                                output_file = os.path.join(LOGS_DIR, 'all_m3u8_urls.txt')
-                                with open(output_file, 'a', encoding='utf-8') as f:
-                                    for item in lesson_urls:
-                                        f.write(f"{item['url']}\n")
-                                        f.flush()  # Forzar escritura inmediata
-                                print(f"         💾 URLs written → download started")
                         
                     except Exception as e:
                         if 'stale element' not in str(e).lower():
@@ -998,36 +1355,10 @@ class SeleniumCourseDownloader:
                 if lessons_with_content > 0:
                     print(f"   ✅ Lessons with content: {lessons_with_content}/{lessons_processed}")
                 else:
-                    # If no content by clicking, capture visible DOM
-                    print(f"   📹 Capturing visible DOM content...")
-                    time.sleep(4)
-                    lesson_urls = self.extract_video_from_dom()
-                    
-                    if lesson_urls:
-                        for url in lesson_urls:
-                            url_type = 'audio' if any(ext in url for ext in ['.mp3', '.m4a', '.aac']) else 'video'
-                            url_item = {
-                                'url': url,
-                                'type': url_type,
-                                'video_id': self.extract_video_id(url)
-                            }
-                            all_videos_urls.append(url_item)
-                            
-                            # 🚀 WRITE IMMEDIATELY to file for async download
-                            output_file = os.path.join(LOGS_DIR, 'all_m3u8_urls.txt')
-                            with open(output_file, 'a', encoding='utf-8') as f:
-                                f.write(f"{url}\n")
-                                f.flush()  # Force immediate write
-                        
-                        videos = [u for u in all_videos_urls if u['type'] == 'video']
-                        audios = [u for u in all_videos_urls if u['type'] == 'audio']
-                        print(f"   💾 {len(lesson_urls)} URLs written → download started")
-                        if videos:
-                            print(f"   ✓ {len(videos)} video(s) captured")
-                        if audios:
-                            print(f"   ✓ {len(audios)} audio(s) captured")
-                    else:
-                        print(f"   ⚠️  No URLs captured in this category")
+                    # OLD METHOD DISABLED - only use individual lesson capture with metadata
+                    print(f"   ⚠️  No videos captured in this category (no playback detected)")
+                    # Note: This happens when videos don't have play button
+                    # Videos are still captured individually if they loaded
                 
                 # 5. Save screenshot of current category
                 self.driver.save_screenshot(f'../output/screenshots/course_{course_index}_category_{category_count}.png')
@@ -1494,9 +1825,9 @@ class SeleniumCourseDownloader:
             return False
     
     def run(self):
-        """Execute the complete process for multiple courses"""
+        """Execute the complete process for multiple courses with batch system"""
         print("=" * 70)
-        print("🎬 VIDEO DOWNLOADER - MARC ZELL KLEIN (SELENIUM)")
+        print("🎬 VIDEO DOWNLOADER - MARC ZELL KLEIN (SELENIUM + BATCH SYSTEM)")
         print("=" * 70)
         
         all_m3u8_urls = []
@@ -1536,14 +1867,26 @@ class SeleniumCourseDownloader:
                     print(f"   ⚠️  No courses found with specified indices: {self.course_filter}")
                     return
             
-            print(f"   📋 Will process {len(courses)} course(s)\n")
+            print(f"   📋 Will process {len(courses)} course(s)")
+            print(f"   🎯 Batch size: {self.batch_size} lessons per batch")
+            print(f"   🔄 Browser restart: Every {self.batch_size} lessons\n")
             
-            # 3. Process each course
+            # Load checkpoint to resume if needed
+            checkpoint = self.load_checkpoint()
+            start_course_index = checkpoint.get('course_index', 0) if checkpoint else 0
+            
+            # 3. Process each course with batch system
             for course in courses:
+                # Skip courses before checkpoint
+                if course['index'] - 1 < start_course_index:
+                    print(f"⏭️  Skipping Course #{course['index']} (already completed)")
+                    continue
+                
                 print("\n" + "=" * 70)
                 print(f"📚 PROCESSING COURSE #{course['index']} of {len(courses)}")
                 print("=" * 70)
                 
+                # Navigate to course
                 success, course_title = self.navigate_to_course(course['index'], course['xpath'])
                 
                 if not success:
@@ -1556,20 +1899,17 @@ class SeleniumCourseDownloader:
                 
                 # Update course name
                 course['name'] = course_title or course['name']
+                course_url = self.driver.current_url
                 
-                # 4. Navigate through all course lessons and capture videos
-                print(f"\n🎬 Navigating through lessons of '{course['name']}'...")
-                videos = self.find_videos(course_index=course['index'])
+                # 4. Process course in batches
+                print(f"\n🎬 Processing '{course['name']}' in batches...")
+                self.process_course_in_batches(
+                    course_index=course['index'] - 1,
+                    course_url=course_url,
+                    course_name=course['name']
+                )
                 
-                # Save course information
-                course_info = {
-                    'course': course,
-                    'videos_found': len(videos),
-                    'videos': videos
-                }
-                processed_courses.append(course_info)
-                
-                print(f"\n✅ Course '{course['name']}' completed: {len(videos)} videos found")
+                print(f"\n✅ Course '{course['name']}' completed!")
                 
                 # 5. Return to course page to process the next one
                 if course['index'] < len(courses):

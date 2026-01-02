@@ -9,30 +9,63 @@ import os
 import sys
 import time
 import threading
+import argparse
 from pathlib import Path
 
 # Configuration
 SCRIPT_DIR = Path(__file__).parent
 M3U8_FILE = SCRIPT_DIR / "../output/logs/all_m3u8_urls.txt"
 OUTPUT_DIR = SCRIPT_DIR / "../output/videos"
+COOKIES_FILE = SCRIPT_DIR / "../output/logs/cookies.txt"
 
-def run_scraper():
+def run_scraper(courses=None, headless=False):
     """Execute Selenium scraper in a thread"""
     print("🔍 Starting video scraper...")
-    result = subprocess.run(
-        ["python3", "download_course_videos_selenium.py"],
-        cwd=SCRIPT_DIR
-    )
+    
+    cmd = ["python3", "download_course_videos_selenium.py"]
+    
+    if courses:
+        cmd.extend(["--courses"] + [str(c) for c in courses])
+    
+    if headless:
+        cmd.append("--headless")
+    
+    result = subprocess.run(cmd, cwd=SCRIPT_DIR)
     return result.returncode == 0
 
 def monitor_and_download():
-    """Monitor URL file and download in parallel"""
-    print("📥 Starting download monitor...\n")
+    """Monitor URL file and download IMMEDIATELY (tokens expire in 60min)"""
+    print("📥 Starting immediate download monitor...\n")
     
     downloaded_urls = set()
+    METADATA_FILE = SCRIPT_DIR / "../output/logs/video_metadata.jsonl"
+    active_downloads = {}  # pid -> filename
+    MAX_PARALLEL = 3  # Maximum 3 downloads at once
     
     while True:
         try:
+            # Clean up completed downloads
+            for pid in list(active_downloads.keys()):
+                try:
+                    os.kill(pid, 0)  # Check if process exists
+                except OSError:
+                    # Process finished
+                    print(f"✅ Completed: {active_downloads[pid]}")
+                    del active_downloads[pid]
+            
+            # Read metadata if available
+            metadata_by_url = {}
+            if METADATA_FILE.exists():
+                import json
+                with open(METADATA_FILE, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        if line.strip():
+                            try:
+                                meta = json.loads(line)
+                                metadata_by_url[meta['url']] = meta
+                            except:
+                                pass
+            
             # Read URLs from file
             if M3U8_FILE.exists():
                 with open(M3U8_FILE, 'r') as f:
@@ -45,42 +78,63 @@ def monitor_and_download():
                 if new_urls:
                     print(f"🆕 {len(new_urls)} new URLs detected")
                     
-                    # Create temporary file with only new URLs
-                    temp_file = SCRIPT_DIR / "../output/logs/temp_urls.txt"
-                    with open(temp_file, 'w') as f:
-                        for url in new_urls:
-                            f.write(f"{url}\n")
-                    
-                    # Download new URLs with direct yt-dlp (faster)
-                    print(f"⬇️  Downloading {len(new_urls)} videos...")
-                    
-                    result = subprocess.run([
-                        "yt-dlp",
-                        "-a", str(temp_file),
-                        "-o", str(OUTPUT_DIR / "video_%(autonumber)03d_%(id)s.mp4"),
-                        "--no-check-certificate",
-                        "-f", "best",
-                        "--merge-output-format", "mp4",
-                        "--concurrent-fragments", "3",
-                        "--progress",
-                    ], cwd=SCRIPT_DIR)
-                    
-                    # Mark as downloaded
-                    downloaded_urls.update(new_urls)
-                    
-                    # Clean up temporary file
-                    temp_file.unlink(missing_ok=True)
+                    # Download EACH video but LIMIT parallel downloads
+                    for url in new_urls:
+                        # Wait if too many active downloads
+                        while len(active_downloads) >= MAX_PARALLEL:
+                            time.sleep(2)
+                            # Clean up completed
+                            for pid in list(active_downloads.keys()):
+                                try:
+                                    os.kill(pid, 0)
+                                except OSError:
+                                    print(f"✅ Completed: {active_downloads[pid]}")
+                                    del active_downloads[pid]
+                        
+                        # Get metadata for this URL
+                        meta = metadata_by_url.get(url, {})
+                        course = meta.get('course', 'Unknown').replace('/', '-').replace(' ', '_')
+                        category = meta.get('category', 0)
+                        lesson = meta.get('lesson', 0)
+                        
+                        # Generate descriptive filename
+                        filename = f"{course}_Cat{category:02d}_Lesson{lesson:02d}.mp4"
+                        output_path = OUTPUT_DIR / filename
+                        
+                        print(f"⬇️  Downloading: {filename} ({len(active_downloads)+1}/{MAX_PARALLEL} active)")
+                        
+                        # Launch download with cookies and logs to file
+                        log_file = OUTPUT_DIR / f"{filename}.log"
+                        cmd = [
+                            "yt-dlp",
+                            url,
+                            "-o", str(output_path),
+                            "--no-check-certificate",
+                            "-f", "best",
+                            "--merge-output-format", "mp4",
+                            "--concurrent-fragments", "3"
+                        ]
+                        
+                        # Add cookies if file exists
+                        if COOKIES_FILE.exists():
+                            cmd.extend(["--cookies", str(COOKIES_FILE)])
+                        
+                        with open(log_file, 'w') as log:
+                            proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
+                        
+                        active_downloads[proc.pid] = filename
+                        downloaded_urls.add(url)
             
-            # Wait before checking again
-            time.sleep(10)
+            # Wait 2 seconds before checking again (faster response)
+            time.sleep(2)
             
-            # Check if scraper finished (file has final header)
+            # Check if scraper finished
             if M3U8_FILE.exists():
                 with open(M3U8_FILE, 'r') as f:
                     content = f.read()
-                    if "Total de medios" in content:
-                        print("\n✅ Scraper completed, processing final URLs...")
-                        time.sleep(5)  # Give time for final downloads
+                    if "Total de medios" in content or "Total media" in content:
+                        print("\n✅ Scraper completed, waiting for final downloads...")
+                        time.sleep(30)  # Wait for all downloads to finish
                         break
                         
         except Exception as e:
@@ -90,9 +144,24 @@ def monitor_and_download():
     print("✅ Download monitor finished")
 
 def main():
+    # Parse arguments
+    parser = argparse.ArgumentParser(description='Complete pipeline: scraping and downloading in parallel')
+    parser.add_argument('-c', '--courses', type=int, nargs='+', metavar='N',
+                       help='Course numbers to process (e.g., -c 1 2 3)')
+    parser.add_argument('--headless', action='store_true',
+                       help='Run browser in headless mode')
+    
+    args = parser.parse_args()
+    
     print("=" * 70)
     print("🚀 COMPLETE PIPELINE - PARALLEL SCRAPING AND DOWNLOADING")
     print("=" * 70)
+    print()
+    
+    if args.courses:
+        print(f"📋 Processing only course(s): {', '.join(map(str, args.courses))}")
+    if args.headless:
+        print("👻 Running in headless mode")
     print()
     
     # Create directories
@@ -110,7 +179,7 @@ def main():
     
     # Execute scraper (blocks until finished)
     try:
-        scraper_success = run_scraper()
+        scraper_success = run_scraper(courses=args.courses, headless=args.headless)
         
         if not scraper_success:
             print("\n⚠️  Scraper finished with errors")
