@@ -149,7 +149,48 @@ class SeleniumCourseDownloader:
         self.max_parallel_downloads = 3  # Maximum parallel downloads
         self.checkpoint_file = Path("../output/logs/checkpoint.json")
         self.batch_size = 3  # Process 3 lessons per browser session
+        
+        # Load already downloaded videos from files
+        self.load_downloaded_videos()
+        
         self.setup_driver()
+    
+    def load_downloaded_videos(self):
+        """Check existing .mp4 files and report statistics"""
+        videos_dir = Path("../output/videos")
+        if not videos_dir.exists():
+            return
+        
+        # Search in both root and subfolders
+        mp4_files = list(videos_dir.glob("*.mp4")) + list(videos_dir.glob("*/*.mp4"))
+        if not mp4_files:
+            return
+            
+        print(f"\n📂 Checking existing downloads...")
+        print(f"   ✓ Found {len(mp4_files)} .mp4 files")
+        
+        # Validate files: check size (should be > 1MB for valid video)
+        valid_count = 0
+        invalid_count = 0
+        min_size = 1 * 1024 * 1024  # 1MB minimum
+        
+        for mp4_file in mp4_files:
+            try:
+                file_size = mp4_file.stat().st_size
+                if file_size > min_size:
+                    valid_count += 1
+                else:
+                    invalid_count += 1
+                    print(f"   ⚠️  Invalid file (too small): {mp4_file.name} ({file_size:,} bytes)")
+            except:
+                invalid_count += 1
+        
+        print(f"   ✓ Valid downloads: {valid_count}")
+        if invalid_count > 0:
+            print(f"   ⚠️  Invalid/incomplete: {invalid_count} (will re-download if encountered)")
+        
+        print(f"   💡 Duplicate detection: BY FILENAME (not by video_id)")
+        print()
     
     def save_checkpoint(self, course_index, category_number, lesson_number):
         """Save current progress"""
@@ -165,16 +206,55 @@ class SeleniumCourseDownloader:
         print(f"   💾 Checkpoint saved: Course {course_index}, Cat {category_number}, Lesson {lesson_number}")
     
     def load_checkpoint(self):
-        """Load previous progress"""
+        """Load previous progress with validation"""
         if self.checkpoint_file.exists():
             try:
                 with open(self.checkpoint_file, 'r') as f:
                     checkpoint = json.load(f)
+                
+                # Validate structure
+                required_keys = ['course_index', 'category_number', 'lesson_number']
+                if not all(key in checkpoint for key in required_keys):
+                    print("   ⚠️  Invalid checkpoint structure - removing")
+                    self.checkpoint_file.unlink()
+                    return None
+                
+                # Validate ranges
+                course_idx = checkpoint['course_index']
+                cat_num = checkpoint['category_number']
+                lesson_num = checkpoint['lesson_number']
+                
+                if not (0 <= course_idx <= 10):
+                    print(f"   ⚠️  Invalid course_index {course_idx} - removing checkpoint")
+                    self.checkpoint_file.unlink()
+                    return None
+                
+                if not (1 <= cat_num <= 50):
+                    print(f"   ⚠️  Invalid category_number {cat_num} - removing checkpoint")
+                    self.checkpoint_file.unlink()
+                    return None
+                
+                if not (0 <= lesson_num <= 500):
+                    print(f"   ⚠️  Invalid lesson_number {lesson_num} - removing checkpoint")
+                    self.checkpoint_file.unlink()
+                    return None
+                
+                # Check age (7 days max)
+                if 'timestamp' in checkpoint:
+                    checkpoint_age = time.time() - checkpoint['timestamp']
+                    if checkpoint_age > 7 * 24 * 3600:
+                        print(f"   ⚠️  Checkpoint too old ({checkpoint_age/(24*3600):.1f} days) - removing")
+                        self.checkpoint_file.unlink()
+                        return None
+                
                 self.captured_video_ids = set(checkpoint.get('completed_video_ids', []))
-                print(f"   📂 Checkpoint loaded: {len(self.captured_video_ids)} videos already processed")
+                print(f"   📂 Checkpoint loaded: Course {course_idx}, Cat {cat_num}, Lesson {lesson_num}")
+                print(f"      {len(self.captured_video_ids)} videos already processed")
                 return checkpoint
-            except:
-                pass
+            except Exception as e:
+                print(f"   ⚠️  Checkpoint load error: {e} - removing")
+                self.checkpoint_file.unlink()
+                return None
         return None
     
     def wait_for_downloads(self):
@@ -256,7 +336,7 @@ class SeleniumCourseDownloader:
             self.lessons_processed_this_batch = 0
             
             # Process batch
-            self.find_videos(
+            videos, last_cat, last_lesson = self.find_videos(
                 course_index=course_index,
                 course_name=course_name,
                 start_category=start_category,
@@ -270,10 +350,17 @@ class SeleniumCourseDownloader:
                 print("\n✅ No more lessons to process - course complete!")
                 break
             
-            print(f"\n✅ Batch completed: {lessons_this_batch} lessons processed")
+            import datetime
+            end_time = datetime.datetime.now()
+            print(f"\n[{end_time.strftime('%H:%M:%S')}] ✅ Batch completed: {lessons_this_batch} lessons processed")
+            print(f"   📍 Stopped at: Cat {last_cat}, Lesson {last_lesson + 1}")
             
             # Update position for next batch
-            start_lesson += lessons_this_batch
+            # IMPORTANT: last_lesson is 0-indexed (Lesson 1 = 0, Lesson 2 = 1, etc.)
+            # We want to continue from the NEXT lesson, so we keep last_lesson as-is
+            # The skip logic in find_videos() will handle: lessons_processed < start_lesson
+            start_category = last_cat
+            start_lesson = last_lesson  # Don't add 1 here, let find_videos() handle it
             
             # Save checkpoint with current position
             self.save_checkpoint(course_index, start_category, start_lesson)
@@ -334,6 +421,11 @@ class SeleniumCourseDownloader:
         try:
             self.driver = webdriver.Chrome(options=options)
             self.driver.set_page_load_timeout(30)
+            
+            # Minimize window if not headless (to avoid blocking other windows)
+            if not self.headless:
+                self.driver.minimize_window()
+                print("   ✓ Window minimized to avoid blocking screen")
             
             # Execute JavaScript to hide webdriver property
             self.driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
@@ -416,7 +508,19 @@ class SeleniumCourseDownloader:
             })
             
             output_path = Path(f"../output/videos/{filename}")
-            log_file = Path(f"../output/videos/{filename}.log")
+            
+            # Create subfolder if filename contains course prefix
+            if filename.startswith("APEX_"):
+                output_path = Path(f"../output/videos/APEX/{filename}")
+            elif filename.startswith("Hypnosis_"):
+                output_path = Path(f"../output/videos/Hypnosis/{filename}")
+            elif filename.startswith("The_Simple_Course_"):
+                output_path = Path(f"../output/videos/Simple_Course/{filename}")
+            
+            # Ensure directory exists
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            log_file = output_path.with_suffix('.mp4.log')
             
             # Download using yt-dlp with custom cookies (via --add-header)
             # We'll pass the session cookies as a file
@@ -821,11 +925,15 @@ class SeleniumCourseDownloader:
             start_lesson: Lesson to start from in that category (0-indexed)
             max_lessons: Maximum lessons to process before returning (None = all)
         """
-        print(f"\n🔍 Navigating through course playlist (from Cat {start_category}, Lesson {start_lesson+1})...")
+        import datetime
+        start_time = datetime.datetime.now()
+        print(f"\n🔍 [{start_time.strftime('%H:%M:%S')}] Navigating through course playlist (from Cat {start_category}, Lesson {start_lesson+1})...")
         
         all_videos_urls = []
         self.current_course_name = course_name  # Save for later use
         self.lessons_processed_this_batch = 0  # Counter for batch
+        self.last_category_processed = start_category  # Track last category
+        self.last_lesson_processed = start_lesson  # Track last lesson in that category
         
         # Wait for page to load
         time.sleep(5)
@@ -929,9 +1037,16 @@ class SeleniumCourseDownloader:
         print()
         
         # STEP 3: Click "Previous Category" until blocked (go to beginning)
-        print("⏪ Navigating to start with Previous Category...")
-        prev_clicks = 0
-        max_prev_clicks = 200
+        # CRITICAL: Only go to start if we're beginning from Cat 1
+        # If resuming from checkpoint, DON'T go back to start
+        if start_category == 1 and start_lesson == 0:
+            print("⏪ Navigating to start with Previous Category...")
+            prev_clicks = 0
+            max_prev_clicks = 200
+        else:
+            print(f"⏩ Skipping Previous Category navigation (resuming from Cat {start_category}, Lesson {start_lesson + 1})")
+            prev_clicks = 0
+            max_prev_clicks = 0
         
         while prev_clicks < max_prev_clicks:
             try:
@@ -970,12 +1085,14 @@ class SeleniumCourseDownloader:
                     next_button = self.driver.find_element(By.XPATH, next_button_xpath)
                     if next_button.is_enabled():
                         self.driver.execute_script("arguments[0].click();", next_button)
-                        time.sleep(3)
+                        time.sleep(4)  # Wait longer for content to load
                     else:
                         break
                 except:
                     break
             category_count = start_category - 1
+            print(f"   ✓ Fast-forwarded to category {start_category}")
+            time.sleep(5)  # Extra wait for page to stabilize
         
         while category_count < max_categories:
             category_count += 1
@@ -989,6 +1106,20 @@ class SeleniumCourseDownloader:
             
             # Wait for page to stabilize
             time.sleep(3)
+            
+            # OPTIMIZATION: Check if this category is already complete by counting files
+            course_name = getattr(self, 'current_course_name', 'Unknown').replace('/', '-').replace(' ', '_')
+            subfolder = ""
+            if course_name.startswith("APEX"):
+                subfolder = "APEX/"
+            elif course_name.startswith("Hypnosis"):
+                subfolder = "Hypnosis/"
+            elif course_name.startswith("The_Simple_Course"):
+                subfolder = "Simple_Course/"
+            
+            videos_dir = Path("../output/videos")
+            existing_files = list(videos_dir.glob(f"{subfolder}{course_name}_Cat{category_count:02d}_*.mp4"))
+            existing_count = len(existing_files)
             
             try:
                 # 1. Read how many lessons are in this category
@@ -1011,6 +1142,29 @@ class SeleniumCourseDownloader:
                 except:
                     total_lessons_in_category = 200  # Higher default if not found
                     print(f"   ⚠️  Could not read counter, assuming {total_lessons_in_category} lessons")
+                
+                # Check if category is already complete
+                if existing_count >= total_lessons_in_category and total_lessons_in_category < 200:
+                    print(f"   ✅ Category complete: {existing_count}/{total_lessons_in_category} videos already downloaded")
+                    print(f"   ⏭️  Skipping to next category...\n")
+                    
+                    # Advance to next category
+                    try:
+                        next_button = self.driver.find_element(By.XPATH, next_button_xpath)
+                        if next_button.is_enabled() and next_button.is_displayed():
+                            self.driver.execute_script("arguments[0].scrollIntoView(true);", next_button)
+                            time.sleep(1)
+                            self.driver.execute_script("arguments[0].click();", next_button)
+                            time.sleep(6)
+                            continue  # Skip to next category iteration
+                        else:
+                            print("   ✓ 'Next Category' disabled - end of course reached")
+                            break
+                    except:
+                        print("   ✓ Could not advance - end of course reached")
+                        break
+                elif existing_count > 0:
+                    print(f"   📁 Found {existing_count} existing videos in this category")
                 
                 # 2. Search for playlist container
                 playlist_container = self.driver.find_element(By.XPATH, playlist_container_xpath)
@@ -1116,6 +1270,7 @@ class SeleniumCourseDownloader:
                 lessons_processed = 0
                 lessons_with_content = 0
                 lesson_urls = []  # Initialize here to avoid variable error
+                lessons_actually_checked = 0  # Track lessons we actually tried to download (not skipped)
                 
                 for idx, item in enumerate(playlist_items, 1):
                     # Check batch limit
@@ -1127,10 +1282,15 @@ class SeleniumCourseDownloader:
                     if lessons_processed >= total_lessons_in_category:
                         break
                     
-                    # Skip lessons before start_lesson if we're in start_category
-                    if category_count == start_category and lessons_processed < start_lesson:
+                    # Skip lessons before and including start_lesson if we're in start_category
+                    # start_lesson is 0-indexed and represents the LAST processed lesson
+                    # So we skip all lessons <= start_lesson
+                    if category_count == start_category and lessons_processed <= start_lesson:
                         lessons_processed += 1
                         continue
+                    
+                    # From here on, we're actually checking/processing this lesson
+                    lessons_actually_checked += 1
                     
                     try:
                         item_id = item.get_attribute('id')
@@ -1277,11 +1437,41 @@ class SeleniumCourseDownloader:
                                             break  # Only capture 1 URL per lesson
                                             
                                         if 'master.m3u8' in url and 'token=' in url:
-                                            video_id = url.split('/videos/')[-1].split('_')[0] if '/videos/' in url else url.split('/')[-1][:36]
+                                            # Build expected filename
+                                            course_name = getattr(self, 'current_course_name', 'Unknown').replace('/', '-').replace(' ', '_')
+                                            filename = f"{course_name}_Cat{category_count:02d}_Lesson{lessons_processed:02d}.mp4"
                                             
-                                            # Only add if BOTH url AND video_id are new
-                                            if url not in seen_urls_in_category and video_id not in self.captured_video_ids:
+                                            # Determine subfolder based on course name
+                                            subfolder = ""
+                                            if course_name.startswith("APEX"):
+                                                subfolder = "APEX/"
+                                            elif course_name.startswith("Hypnosis"):
+                                                subfolder = "Hypnosis/"
+                                            elif course_name.startswith("The_Simple_Course"):
+                                                subfolder = "Simple_Course/"
+                                            
+                                            filepath = Path(f"../output/videos/{subfolder}{filename}")
+                                            
+                                            # Check if file already exists with valid size
+                                            if filepath.exists():
+                                                file_size = filepath.stat().st_size
+                                                if file_size > 1048576:  # > 1MB = valid
+                                                    print(f"         ℹ️  Already downloaded: {filename} ({file_size / (1024*1024):.1f}MB) - SKIPPING")
+                                                    # DON'T count skipped videos in batch limit
+                                                    # Just update position tracking
+                                                    self.last_category_processed = category_count
+                                                    self.last_lesson_processed = lessons_processed
+                                                    captured_this_lesson += 1
+                                                    continue
+                                                else:
+                                                    print(f"         ⚠️  File exists but too small ({file_size:,} bytes) - RE-DOWNLOADING")
+                                            
+                                            # File doesn't exist or is invalid - proceed with download
+                                            if url not in seen_urls_in_category:
                                                 seen_urls_in_category.add(url)
+                                                
+                                                # Extract video_id for tracking
+                                                video_id = url.split('/videos/')[-1].split('_')[0] if '/videos/' in url else url.split('/')[-1][:36]
                                                 self.captured_video_ids.add(video_id)
                                                 
                                                 # WRITE IMMEDIATELY
@@ -1303,13 +1493,14 @@ class SeleniumCourseDownloader:
                                                 print(f"         🚀 URL captured → download starting NOW")
                                                 
                                                 # Download immediately with Selenium session
-                                                course_name = getattr(self, 'current_course_name', 'Unknown').replace('/', '-').replace(' ', '_')
-                                                filename = f"{course_name}_Cat{category_count:02d}_Lesson{lessons_processed:02d}.mp4"
                                                 self.download_video_with_selenium_session(url, filename)
                                                 
                                                 lesson_urls.append({'url': url, 'type': 'video', 'video_id': video_id})
                                                 captured_this_lesson += 1
                                                 self.lessons_processed_this_batch += 1
+                                                # Update last position
+                                                self.last_category_processed = category_count
+                                                self.last_lesson_processed = lessons_processed
                                     
                                     if captured_this_lesson > 0:
                                         print(f"         ✅ Captured URL for this lesson")
@@ -1364,7 +1555,26 @@ class SeleniumCourseDownloader:
                 self.driver.save_screenshot(f'../output/screenshots/course_{course_index}_category_{category_count}.png')
                 
                 # 6. Click on "Next Category" to advance to the next one
-                # 6. Click on "Next Category" to advance to the next one
+                # IMPORTANT: Only advance if we finished all lessons in current category
+                # If batch limit was reached mid-category, DON'T advance
+                should_advance_category = True
+                
+                # Check if we stopped mid-category due to batch limit
+                if max_lessons is not None and self.lessons_processed_this_batch >= max_lessons:
+                    # Calculate how many lessons remain in this category
+                    remaining_in_category = total_lessons_in_category - lessons_processed
+                    
+                    if remaining_in_category > 0:
+                        should_advance_category = False
+                        print(f"   ⏸️  Staying in category {category_count} ({remaining_in_category} lessons remaining)")
+                    else:
+                        print(f"   ✅ Category {category_count} completed (all {total_lessons_in_category} lessons processed)")
+                
+                if not should_advance_category:
+                    # Don't click Next Category, just break to return control
+                    print(f"\n✅ Batch limit reached ({max_lessons} lessons processed)")
+                    break
+                
                 print("\n   🔄 Advancing to next category...")
                 
                 try:
@@ -1460,8 +1670,9 @@ class SeleniumCourseDownloader:
         self.driver.save_screenshot('../output/screenshots/course_final_page.png')
         
         print(f"\n   📹 Total: {len(all_videos_urls)} unique videos found")
+        print(f"   📍 Last position: Cat {self.last_category_processed}, Lesson {self.last_lesson_processed + 1}")
         
-        return all_videos_urls
+        return all_videos_urls, self.last_category_processed, self.last_lesson_processed
     
     def extract_video_id(self, url):
         """Extract unique video ID from URL"""
@@ -1877,10 +2088,45 @@ class SeleniumCourseDownloader:
             
             # 3. Process each course with batch system
             for course in courses:
-                # Skip courses before checkpoint
+                # Check if course should be skipped based on checkpoint
                 if course['index'] - 1 < start_course_index:
-                    print(f"⏭️  Skipping Course #{course['index']} (already completed)")
-                    continue
+                    # Verify if course is actually complete by counting downloaded files
+                    course_name_pattern = None
+                    if course['index'] == 1:
+                        course_name_pattern = "APEX_"
+                    elif course['index'] == 2:
+                        course_name_pattern = "Hypnosis_"
+                    elif course['index'] == 3:
+                        course_name_pattern = "The_Simple_Course_"
+                    
+                    if course_name_pattern:
+                        from pathlib import Path
+                        videos_dir = Path("../output/videos")
+                        # Search in both root and subfolders
+                        downloaded_count = len(list(videos_dir.glob(f"{course_name_pattern}*.mp4"))) + \
+                                         len(list(videos_dir.glob(f"*/{course_name_pattern}*.mp4")))
+                        
+                        # Known course sizes (approximate)
+                        expected_counts = {
+                            1: 112,  # APEX has ~112 lessons
+                            2: 50,   # Hypnosis has ~50 lessons (estimate)
+                            3: 5     # Simple Course has 5 lessons
+                        }
+                        
+                        expected = expected_counts.get(course['index'], 0)
+                        if downloaded_count < expected:
+                            print(f"⚠️  Course #{course['index']}: Only {downloaded_count}/{expected} videos downloaded")
+                            print(f"   🔄 Removing checkpoint to re-process incomplete course...")
+                            if self.checkpoint_file.exists():
+                                self.checkpoint_file.unlink()
+                            # Don't skip this course
+                        else:
+                            print(f"✅ Course #{course['index']}: Complete ({downloaded_count}/{expected} videos)")
+                            print(f"⏭️  Skipping Course #{course['index']} (already completed)")
+                            continue
+                    else:
+                        print(f"⏭️  Skipping Course #{course['index']} (already completed)")
+                        continue
                 
                 print("\n" + "=" * 70)
                 print(f"📚 PROCESSING COURSE #{course['index']} of {len(courses)}")
@@ -1920,6 +2166,19 @@ class SeleniumCourseDownloader:
                     # Verify we're on the correct page
                     if 'library-v2' in self.driver.current_url:
                         print("   ✓ Back in course list")
+                    elif 'login' in self.driver.current_url:
+                        print(f"   ⚠️  Session expired, re-logging in...")
+                        if self.login():
+                            print("   ✓ Re-login successful")
+                            # Navigate to course list again
+                            self.driver.get(COURSE_URL)
+                            time.sleep(4)
+                            if 'library-v2' in self.driver.current_url:
+                                print("   ✓ Back in course list")
+                            else:
+                                print(f"   ❌ Still can't access course list: {self.driver.current_url}")
+                        else:
+                            print("   ❌ Re-login failed")
                     else:
                         print(f"   ⚠️  Unexpected URL: {self.driver.current_url}")
                 else:
