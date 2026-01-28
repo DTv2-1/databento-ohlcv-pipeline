@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Script to download videos from marczellklein.com course site
-Version with Selenium to handle dynamic JavaScript content
+Custom scraper for marczellklein.com with direct login link
+Uses loginCode parameter for automatic authentication
 """
 
 from selenium import webdriver
@@ -43,8 +43,10 @@ PASSWORD = os.getenv('VIDEO_DOWNLOADER_PASSWORD')
 if not EMAIL or not PASSWORD:
     raise ValueError("VIDEO_DOWNLOADER_EMAIL and VIDEO_DOWNLOADER_PASSWORD must be set in .env file")
 
-# URLs
+# URLs - CUSTOM LOGIN LINK
 BASE_URL = "https://members.marczellklein.com"
+# Direct link with loginCode - bypasses normal login flow
+DIRECT_LOGIN_URL = "https://members.marczellklein.com?email=petedavisesq@gmail.com&loginCode=@9vVRwL&user=56319fe7-a1c6-42da-86be-181ad3987f8e&redirectUrl=courses/library-v2"
 COURSE_URL = "https://members.marczellklein.com/courses/library-v2"
 
 # Output directories (relative to scripts folder)
@@ -616,109 +618,27 @@ class SeleniumCourseDownloader:
             print(f"         ❌ Download error: {str(e)[:60]}")
     
     def login(self):
-        """Authenticate on the site"""
-        print("\n🔐 Starting login...")
+        """Authenticate on the site using direct login link"""
+        print("\n🔐 Starting login with direct link...")
         
         try:
-            # Go to main page
-            print(f"   Navigating to: {BASE_URL}")
-            self.driver.get(BASE_URL)
-            time.sleep(3)  # Wait for JavaScript to load
+            # Use the direct login URL with loginCode
+            print(f"   Navigating to direct login URL...")
+            self.driver.get(DIRECT_LOGIN_URL)
+            time.sleep(8)  # Wait for redirect and authentication
             
             # Save screenshot
-            self.driver.save_screenshot('../output/screenshots/step1_homepage.png')
-            print("   Screenshot saved: step1_homepage.png")
+            self.driver.save_screenshot('../output/screenshots/step1_direct_login.png')
+            print("   Screenshot saved: step1_direct_login.png")
             
-            # Search for login/sign in button
-            login_selectors = [
-                "//button[contains(text(), 'Sign In')]",
-                "//button[contains(text(), 'Log In')]",
-                "//a[contains(text(), 'Sign In')]",
-                "//a[contains(text(), 'Log In')]",
-                "//button[contains(@class, 'login')]",
-                "//a[contains(@class, 'login')]",
-                "//input[@type='email']",  # If form is already visible
-            ]
-            
-            login_button = None
-            for selector in login_selectors:
-                try:
-                    elements = self.driver.find_elements(By.XPATH, selector)
-                    if elements:
-                        login_button = elements[0]
-                        print(f"   ✓ Login element found: {selector}")
-                        break
-                except:
-                    continue
-            
-            if not login_button:
-                print("   ⚠️  Login button not found")
-                print("   Saving current page...")
-                with open('../output/html/page_source_base.html', 'w', encoding='utf-8') as f:
-                    f.write(self.driver.page_source)
-                
-                # Try direct access to course page
-                print(f"   Attempting direct access to: {COURSE_URL}")
-                self.driver.get(COURSE_URL)
-                time.sleep(5)
-                
-                self.driver.save_screenshot('../output/screenshots/step2_course_direct.png')
-                
-                # Check if there's a login form now
-                login_button = self._find_login_elements()
-            
-            # If we found a button, click it
-            if login_button and login_button.tag_name in ['button', 'a']:
-                print("   Clicking login button...")
-                login_button.click()
-                time.sleep(3)
-                self.driver.save_screenshot('../output/screenshots/step3_after_click.png')
-            
-            # Now search for email and password fields
-            print("   Looking for form fields...")
-            email_field = self._find_email_field()
-            password_field = self._find_password_field()
-            
-            if not email_field or not password_field:
-                print("   ❌ Email/password fields not found")
-                with open('../output/html/page_source_login.html', 'w', encoding='utf-8') as f:
-                    f.write(self.driver.page_source)
-                return False
-            
-            # Fill form
-            print("   Entering credentials...")
-            email_field.clear()
-            email_field.send_keys(EMAIL)
-            time.sleep(0.5)
-            
-            password_field.clear()
-            password_field.send_keys(PASSWORD)
-            time.sleep(0.5)
-            
-            self.driver.save_screenshot('../output/screenshots/step4_filled_form.png')
-            
-            # Find and click submit button
-            submit_button = self._find_submit_button()
-            if submit_button:
-                print("   Submitting form...")
-                submit_button.click()
-            else:
-                print("   Submitting form with Enter...")
-                password_field.send_keys('\n')
-            
-            # Wait for page to load after login
-            print("   Waiting for server response...")
-            time.sleep(8)  # More time to load
-            self.driver.save_screenshot('../output/screenshots/step5_after_login.png')
-            
-            # Check if login was successful
+            # Check current URL after redirect
             current_url = self.driver.current_url
             page_source = self.driver.page_source.lower()
             
             print(f"   Current URL: {current_url}")
             
             # Save page after login
-            with open('../output/html/page_after_login.html', 'w', encoding='utf-8') as f:
+            with open('../output/html/page_after_direct_login.html', 'w', encoding='utf-8') as f:
                 f.write(self.driver.page_source)
             
             # Look for successful login indicators
@@ -732,33 +652,18 @@ class SeleniumCourseDownloader:
                     print(f"✅ Login successful (found: '{indicator}')")
                     return True
             
-            # Check if we're on a different page than login
-            if 'login' not in current_url.lower() and 'sign' not in current_url.lower():
-                print("✅ Login successful (redirected away from login)")
+            # Check if we're on the courses page
+            if 'courses' in current_url.lower() or 'library' in current_url.lower():
+                print("✅ Login successful (redirected to courses)")
                 return True
             
-            # Check for explicit error messages
-            error_indicators = ['invalid', 'incorrect', 'wrong', 'failed', 'denied']
-            error_found = False
-            for error in error_indicators:
-                if error in page_source:
-                    error_found = True
-                    break
+            # If direct login didn't work, fallback to normal login
+            print("   ⚠️  Direct login may not have worked, trying normal login...")
+            return self._fallback_login()
             
-            if error_found:
-                print("❌ Login failed - error message detected")
-                with open('../output/html/page_source_error.html', 'w', encoding='utf-8') as f:
-                    f.write(self.driver.page_source)
-                return False
-            
-            # If no explicit error, assume it worked
-            print("✅ Login completed (no errors detected)")
-            
-            # Export cookies for yt-dlp
-            self.export_cookies_for_ytdlp()
-            
-            return True
-            
+        except Exception as e:
+            print(f"❌ Login error: {e}")
+            return False
         except Exception as e:
             print(f"❌ Error during login: {e}")
             self.driver.save_screenshot('../output/screenshots/error_login.png')
@@ -861,6 +766,51 @@ class SeleniumCourseDownloader:
             except:
                 continue
         return None
+    
+    def _fallback_login(self):
+        """Fallback to normal login if direct link fails"""
+        print("   Attempting fallback login method...")
+        
+        # Try direct access to course page
+        print(f"   Attempting direct access to: {COURSE_URL}")
+        self.driver.get(COURSE_URL)
+        time.sleep(5)
+        
+        # Look for form fields
+        email_field = self._find_email_field()
+        password_field = self._find_password_field()
+        
+        if not email_field or not password_field:
+            print("   ❌ Fallback login failed - no form fields")
+            return False
+        
+        # Fill form
+        print("   Entering credentials...")
+        email_field.clear()
+        email_field.send_keys(EMAIL)
+        time.sleep(0.5)
+        
+        password_field.clear()
+        password_field.send_keys(PASSWORD)
+        time.sleep(0.5)
+        
+        # Submit
+        submit_button = self._find_submit_button()
+        if submit_button:
+            submit_button.click()
+        else:
+            password_field.send_keys('\n')
+        
+        time.sleep(5)
+        
+        # Check success
+        current_url = self.driver.current_url
+        if 'courses' in current_url.lower():
+            print("✅ Fallback login successful")
+            return True
+        
+        print("❌ Fallback login failed")
+        return False
     
     def navigate_to_course(self, course_index, course_xpath):
         """
