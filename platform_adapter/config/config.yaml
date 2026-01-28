@@ -1,0 +1,32 @@
+# Platform Adapter Configuration
+
+ib_connection:
+  host: "127.0.0.1"
+  port: 7497  # Paper Trading port (7496 for live)
+  client_id: 1
+  timeout: 30
+  auto_reconnect: true
+  reconnect_max_attempts: 5
+  reconnect_delay: 2.0
+
+market_data:
+  rate_limit_per_second: 50
+  historical_rate_limit_per_10min: 60
+  cache_quotes: true
+  cache_size: 1000
+
+orders:
+  default_order_type: "MKT"
+  validate_before_send: true
+  track_order_history: true
+
+account:
+  update_interval_seconds: 180  # 3 minutes
+  cache_positions: true
+  cache_account_values: true
+
+logging:
+  level: "INFO"
+  rotation: "00:00"
+  retention_days: 7
+  log_dir: "logs"
