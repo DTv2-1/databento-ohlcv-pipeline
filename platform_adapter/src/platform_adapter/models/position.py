@@ -1,15 +1,17 @@
 """
-Position model for representing trading positions
+Position model — broker fact, no derived math.
+
+PA 2.0: Position is a pure data container for what the broker tells us.
+market_value and unrealized_pnl belong downstream (MIC), not here.
 """
 
 from dataclasses import dataclass
-from typing import Optional
 
 
 @dataclass
 class Position:
     """
-    Represents a trading position.
+    Represents a trading position (broker fact).
     
     Attributes:
         symbol: Contract symbol
@@ -30,35 +32,20 @@ class Position:
     currency: str = "USD"
     
     @property
-    def market_value(self) -> Optional[float]:
-        """Calculate market value if current price available"""
-        # This would require current market price
-        # Will be implemented when market data is available
-        return None
-    
-    @property
-    def unrealized_pnl(self) -> Optional[float]:
-        """Calculate unrealized P&L if current price available"""
-        # This would require current market price
-        # Will be implemented when market data is available
-        return None
-    
-    @property
     def is_long(self) -> bool:
-        """Check if position is long"""
+        """Check if position is long."""
         return self.quantity > 0
     
     @property
     def is_short(self) -> bool:
-        """Check if position is short"""
+        """Check if position is short."""
         return self.quantity < 0
     
     @property
     def is_flat(self) -> bool:
-        """Check if position is flat (zero)"""
+        """Check if position is flat (zero)."""
         return self.quantity == 0
     
     def __repr__(self) -> str:
-        """String representation"""
         direction = "LONG" if self.is_long else "SHORT" if self.is_short else "FLAT"
         return f"Position({self.symbol}: {direction} {abs(self.quantity)} @ ${self.avg_cost:.2f})"

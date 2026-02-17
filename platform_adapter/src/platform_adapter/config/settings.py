@@ -55,6 +55,14 @@ class Config:
         
         # Environment
         self._config['environment'] = os.getenv('ENVIRONMENT', 'development')
+
+        # r2 env overrides
+        if os.getenv('PA_ACTIVE_MODE'):
+            self._config.setdefault('ib_connection', {})['active_mode'] = os.getenv('PA_ACTIVE_MODE')
+        if os.getenv('IB_PORT_LIVE'):
+            self._config.setdefault('ib_connection', {})['port_live'] = int(os.getenv('IB_PORT_LIVE'))
+        if os.getenv('IB_PORT_PAPER'):
+            self._config.setdefault('ib_connection', {})['port_paper'] = int(os.getenv('IB_PORT_PAPER'))
     
     def get(self, key: str, default: Any = None) -> Any:
         """Get configuration value by key (dot notation supported)"""
@@ -99,6 +107,45 @@ class Config:
     def logging(self) -> Dict[str, Any]:
         """Get logging configuration"""
         return self._config.get('logging', {})
+
+    # ==================================================================
+    # r2 config properties
+    # ==================================================================
+
+    @property
+    def rate_limiting(self) -> Dict[str, Any]:
+        """Get per-channel rate limiting configuration"""
+        return self._config.get('rate_limiting', {})
+
+    @property
+    def order_queue(self) -> Dict[str, Any]:
+        """Get order queue configuration"""
+        return self._config.get('order_queue', {})
+
+    @property
+    def stop_modify_throttle(self) -> Dict[str, Any]:
+        """Get stop-modify throttler configuration"""
+        return self._config.get('stop_modify_throttle', {})
+
+    @property
+    def pacing(self) -> Dict[str, Any]:
+        """Get pacing recovery engine configuration"""
+        return self._config.get('pacing', {})
+
+    @property
+    def kill(self) -> Dict[str, Any]:
+        """Get kill state machine configuration"""
+        return self._config.get('kill', {})
+
+    @property
+    def failsafe(self) -> Dict[str, Any]:
+        """Get failsafe heartbeat monitor configuration"""
+        return self._config.get('failsafe', {})
+
+    @property
+    def reconciliation(self) -> Dict[str, Any]:
+        """Get reconciliation engine configuration"""
+        return self._config.get('reconciliation', {})
 
 
 # Global config instance

@@ -1,17 +1,18 @@
-# Platform Adapter Configuration
+# Platform Adapter r2 Configuration
 
 ib_connection:
   host: "127.0.0.1"
-  port: 7497  # Paper Trading port (7496 for live)
+  port_live: 4001      # IB Gateway Live
+  port_paper: 4002      # IB Gateway Paper
+  port: 4002            # Active port (overridden by active_mode)
+  active_mode: "paper"  # "live" or "paper"
   client_id: 1
   timeout: 30
   auto_reconnect: true
-  reconnect_max_attempts: 5
+  reconnect_max_attempts: 10
   reconnect_delay: 2.0
 
 market_data:
-  rate_limit_per_second: 50
-  historical_rate_limit_per_10min: 60
   cache_quotes: true
   cache_size: 1000
 
@@ -21,10 +22,93 @@ orders:
   track_order_history: true
 
 account:
-  update_interval_seconds: 180  # 3 minutes
+  update_interval_seconds: 180
   cache_positions: true
   cache_account_values: true
 
+# ============================================================================
+# PA r2 — Rate Limiting (per-channel)
+# ============================================================================
+rate_limiting:
+  global_sustained_per_sec: 45    # Conservative under IB's 50 msg/s
+  global_burst_cap: 50            # Hard cap = IB's actual limit
+
+  channels:
+    market_data_subscribe:
+      max_requests: 50
+      time_window: 600            # 50 per 10 min
+    order_place:
+      max_requests: 40
+      time_window: 1              # 40/s conservative
+    order_modify:
+      max_requests: 30
+      time_window: 1
+    order_cancel:
+      max_requests: 30
+      time_window: 1
+    account:
+      max_requests: 8
+      time_window: 60
+    misc:
+      max_requests: 10
+      time_window: 1
+
+# ============================================================================
+# PA r2 — Order Queue
+# ============================================================================
+order_queue:
+  max_size: 1000
+  drain_interval_ms: 50           # Queue processor interval
+
+# ============================================================================
+# PA r2 — Stop-Modify Throttle
+# ============================================================================
+stop_modify_throttle:
+  min_interval_ms: 250            # Min time between stop modifications
+  min_delta_ticks: 1              # Min price change (in ticks) to send modify
+  merge_window_ms: 100            # Merge successive modifies within this window
+
+# ============================================================================
+# PA r2 — Pacing Recovery
+# ============================================================================
+pacing:
+  cooldown_sec: 5                 # Pause after pacing violation detected
+  backoff_multiplier: 2.0         # Multiply cooldown on repeated violations
+  max_cooldown_sec: 60            # Max cooldown
+  critical_only_during_recovery: true  # Only allow critical ops during recovery
+
+# ============================================================================
+# PA r2 — Kill States
+# ============================================================================
+kill:
+  softkill_blocks_open_add: true  # SoftKill blocks OPEN/ADD but allows REDUCE/CLOSE
+  hardkill_cancels_all: true      # HardKill cancels all open orders
+  hardkill_flattens: true         # HardKill flattens all positions
+  lockout_requires_human: true    # Lockout cannot be reset programmatically
+  failsafe_escalates_to_hardkill: true
+
+# ============================================================================
+# PA r2 — Failsafe (Exec heartbeat monitor)
+# ============================================================================
+failsafe:
+  heartbeat_interval_sec: 5       # Expected heartbeat frequency from Exec
+  t_warn_sec: 10                  # Stage 1: log warning after this silence
+  t_freeze_sec: 15                # Stage 2: freeze new orders after this
+  t_flatten_sec: 180              # Stage 3: auto-flatten after this
+  auto_flatten_on_stage3: true
+
+# ============================================================================
+# PA r2 — Reconciliation
+# ============================================================================
+reconciliation:
+  on_connect: true                # Run reconciliation on every connect
+  on_reconnect: true              # Run reconciliation on every reconnect
+  orphan_policy: "log_and_alert"  # "cancel", "adopt", "log_and_alert"
+  position_mismatch_policy: "accept_broker"  # "accept_broker", "alert_only"
+
+# ============================================================================
+# Logging
+# ============================================================================
 logging:
   level: "INFO"
   rotation: "00:00"
