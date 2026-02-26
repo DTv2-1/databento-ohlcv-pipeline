@@ -1,6 +1,8 @@
 # .gitignore
 data/
 logs/
+databento/logs/
+databento/data/
 *.pyc
 __pycache__/
 .env

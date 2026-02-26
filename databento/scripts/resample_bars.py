@@ -28,6 +28,7 @@ class OHLCVAggregator:
     
     # Map de timeframes legibles a pandas frequency
     TIMEFRAME_MAP = {
+        '5s': '5s',
         '15s': '15s',
         '30s': '30s',
         '45s': '45s',
