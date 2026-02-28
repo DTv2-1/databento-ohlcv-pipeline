@@ -178,6 +178,8 @@ class VerifyApp(EWrapper, EClient):
         o.auxPrice = stop_price
         o.tif = "GTC"
         o.transmit = True
+        o.eTradeOnly = False
+        o.firmQuoteOnly = False
         return o
 
     def make_limit_order(self, action, qty, limit_price):
@@ -188,6 +190,8 @@ class VerifyApp(EWrapper, EClient):
         o.lmtPrice = limit_price
         o.tif = "GTC"
         o.transmit = True
+        o.eTradeOnly = False
+        o.firmQuoteOnly = False
         return o
 
 
@@ -298,7 +302,7 @@ def test_3_global_cancel(host, port):
     app.reqGlobalCancel()
     elapsed = time.time() - t0
 
-    time.sleep(2)
+    time.sleep(4)
     status_after_cancel = app.order_statuses.get(oid, "unknown")
     log(f"  Order status after globalCancel: {status_after_cancel} (call took {elapsed*1000:.1f}ms)")
 
@@ -327,11 +331,11 @@ def test_4_stop_modify_flood(host, port):
 
     contract = make_spy_contract()
 
-    # Place initial stop order far from market
+    # Place BUY stop at very high price — won't trigger, no short/margin needed
     oid = app.get_order_id()
-    stop_order = app.make_stop_order("SELL", 1, 1.00)  # $1 stop — won't trigger
+    stop_order = app.make_stop_order("BUY", 1, 99999.00)  # $99999 stop — won't trigger
 
-    log(f"  Placing test stop order id={oid}...")
+    log(f"  Placing test BUY stop order id={oid} @ $99999 (won't trigger)...")
     app.placeOrder(oid, contract, stop_order)
     time.sleep(2)
 
@@ -351,7 +355,7 @@ def test_4_stop_modify_flood(host, port):
     errors_201_before = sum(1 for _, c, _ in app.errors if c == 201)
 
     for i in range(20):
-        modified = app.make_stop_order("SELL", 1, 1.00 + (i * 0.01))
+        modified = app.make_stop_order("BUY", 1, 99999.00 - (i * 0.01))  # Slightly lower each time
         app.placeOrder(oid, contract, modified)
         time.sleep(0.02)  # 20ms = 50 modifies/sec
 
