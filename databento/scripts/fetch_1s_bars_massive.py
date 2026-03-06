@@ -32,6 +32,16 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _safe_dirname(symbol: str) -> str:
+    """
+    Sanitize symbol for use as a filesystem directory/filename.
+    Replaces ':' with '-' so symbols like 'X:BTCUSD' become 'X-BTCUSD'.
+    This is required on Windows where ':' is illegal in paths.
+    The original symbol is always used for API calls.
+    """
+    return symbol.replace(':', '-')
+
+
 class MassiveDownloader:
     """Handles downloading 1-second OHLCV data from Massive.com"""
     
@@ -66,8 +76,10 @@ class MassiveDownloader:
             dict: Result with status, file path, and row count
         """
         # Crear nombre de archivo
-        filename = f"{symbol}_{year}_{month:02d}.csv"
-        filepath = Path(output_dir) / symbol / filename
+        # Use sanitized symbol for filesystem paths (Windows: ':' is illegal in paths)
+        safe_sym = _safe_dirname(symbol)
+        filename = f"{safe_sym}_{year}_{month:02d}.csv"
+        filepath = Path(output_dir) / safe_sym / filename
         
         # Check si ya existe
         if filepath.exists() and not force:
