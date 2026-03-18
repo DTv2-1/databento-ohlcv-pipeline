@@ -85,6 +85,8 @@ class OrderQueue:
         """
         # 1. Idempotency check
         if self._is_duplicate(cmd.command_id):
+            kill_state = self._kill_state_fn()
+            self._emit_rejected(cmd, f"Duplicate command_id: {cmd.command_id}", kill_state)
             return False
 
         # 2. Kill state enforcement

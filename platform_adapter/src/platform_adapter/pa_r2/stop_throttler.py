@@ -90,7 +90,7 @@ class StopModifyThrottler:
             self._mark_sent(cmd.symbol)
             return self.Result(allowed=True, reason="EXIT_BYPASS")
 
-        new_price = float(cmd.order_spec.get("new_stop_price", 0.0))
+        new_price = float(cmd.order_spec.get("stop_price", cmd.order_spec.get("new_stop_price", 0.0)))
 
         # Tighten-only enforcement (SOFTKILL / FAILSAFE_FREEZE)
         if kill_state in (KillState.SOFTKILL, KillState.FAILSAFE_FREEZE):
