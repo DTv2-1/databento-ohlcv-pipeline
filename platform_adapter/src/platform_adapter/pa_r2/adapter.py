@@ -171,7 +171,6 @@ class PAr2Adapter(_IBWrapper, _IBClient):
         self._queue = OrderQueue(
             kill_state_fn=lambda: self._kill_state.state,
             on_event=self._emit,
-            trading_mode=self._mode,
         )
 
         self._throttler = StopModifyThrottler(
@@ -271,7 +270,7 @@ class PAr2Adapter(_IBWrapper, _IBClient):
             self._next_order_id = orderId
         logger.info("PAr2Adapter: nextValidId=%d", orderId)
         self._connected = True
-        self._emit(make_connection_event(True, "nextValidId received", self._mode))
+        self._emit(make_connection_event(up=True, trading_mode=self._mode, details={"next_valid_id": orderId}))
 
         # Auto-reconcile on (re)connect
         if self._cfg.reconciliation.run_on_reconnect:
@@ -284,9 +283,13 @@ class PAr2Adapter(_IBWrapper, _IBClient):
     def connectionClosed(self) -> None:
         self._connected = False
         logger.warning("PAr2Adapter: connection closed")
-        self._emit(make_connection_event(False, "connectionClosed", self._mode))
+        self._emit(make_connection_event(up=False, trading_mode=self._mode, details={"reason": "connectionClosed"}))
 
     def error(self, reqId: int, errorCode: int, errorString: str, advancedOrderReject: str = "") -> None:
+        # IB sends info/warning messages as "errors" — route to appropriate log level
+        if errorCode in (2104, 2106, 2158, 2119):
+            logger.info("PAr2Adapter IB info: reqId=%d code=%d msg=%s", reqId, errorCode, errorString)
+            return
         logger.error("PAr2Adapter IB error: reqId=%d code=%d msg=%s", reqId, errorCode, errorString)
 
         # Pacing warnings
@@ -399,10 +402,29 @@ class PAr2Adapter(_IBWrapper, _IBClient):
                        source: str = "TRADES") -> int:
         req_id = self._next_req_id()
         contract = _make_equity_contract(symbol)
-        self._rate_limiter.acquire(Channel.MARKET_DATA_SUBSCRIBE, Priority.NORMAL, block=True)
+        self._rate_limiter.acquire(Channel.MARKET_DATA, Priority.NORMAL, block=True)
         self.reqRealTimeBars(req_id, contract, 5, source, False, [])
         self._bar_req_ids[req_id] = symbol
         logger.info("PAr2Adapter: subscribe_bars %s req_id=%d", symbol, req_id)
+        return req_id
+
+    def subscribe_bars_futures(self, symbol: str, bar_size: str = "5 secs",
+                               source: str = "TRADES",
+                               exchange: str = "CME",
+                               contract_month: str = "") -> int:
+        """Subscribe to real-time bars for a futures contract (ES, NQ, GC, etc.).
+        
+        contract_month: YYYYMM format, e.g. '202506' for June 2026 quarterly.
+                       Required for reqRealTimeBars — IB needs a specific contract.
+        """
+        req_id = self._next_req_id()
+        contract = _make_contract(symbol, sec_type="FUT", exchange=exchange)
+        contract.lastTradeDateOrContractMonth = contract_month
+        self._rate_limiter.acquire(Channel.MARKET_DATA, Priority.NORMAL, block=True)
+        self.reqRealTimeBars(req_id, contract, 5, source, False, [])
+        self._bar_req_ids[req_id] = symbol
+        logger.info("PAr2Adapter: subscribe_bars_futures %s %s req_id=%d exchange=%s",
+                    symbol, contract_month, req_id, exchange)
         return req_id
 
     def unsubscribe_bars(self, symbol: str) -> None:
@@ -415,7 +437,7 @@ class PAr2Adapter(_IBWrapper, _IBClient):
     def subscribe_quote(self, symbol: str) -> int:
         req_id = self._next_req_id()
         contract = _make_equity_contract(symbol)
-        self._rate_limiter.acquire(Channel.MARKET_DATA_SUBSCRIBE, Priority.NORMAL, block=True)
+        self._rate_limiter.acquire(Channel.MARKET_DATA, Priority.NORMAL, block=True)
         self.reqMktData(req_id, contract, "", False, False, [])
         self._quote_req_ids[req_id] = symbol
         logger.info("PAr2Adapter: subscribe_quote %s req_id=%d", symbol, req_id)
@@ -531,7 +553,7 @@ class PAr2Adapter(_IBWrapper, _IBClient):
         acquired = self._rate_limiter.acquire(channel, priority, block=True, timeout=5.0)
         if not acquired and priority != Priority.EXIT:
             logger.warning("PAr2Adapter: rate limit timeout, command dropped: %s", cmd.command_id)
-            self._emit(make_command_rejected_event(cmd, "RATE_LIMIT_TIMEOUT", self._mode))
+            self._emit(make_command_rejected_event(cmd, "RATE_LIMIT_TIMEOUT", self._kill_state.state))
             return
 
         action = cmd.action
@@ -548,7 +570,7 @@ class PAr2Adapter(_IBWrapper, _IBClient):
                     self._cancel_order_direct(oid)
         except Exception as exc:
             logger.error("PAr2Adapter: dispatch error cmd=%s: %s", cmd.command_id, exc)
-            self._emit(make_command_rejected_event(cmd, repr(exc), self._mode))
+            self._emit(make_command_rejected_event(cmd, repr(exc), self._kill_state.state))
 
     # ── IB order helpers ──────────────────────────────────────────────────────
 
