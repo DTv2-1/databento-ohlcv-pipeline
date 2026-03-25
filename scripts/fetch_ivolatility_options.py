@@ -195,69 +195,97 @@ class IVolatilityClient:
         dl_url = status.get("urlForDetails")
 
         if dl_url:
-            # Large result — need to download CSV
-            logger.info(f"Option series has {records} records, downloading...")
-            logger.info(f"  Download URL: {dl_url}")
-            info = self._api_get_raw(dl_url)
-            if not info:
-                logger.error("Failed to download detail URL")
+            # Large result — API generates file asynchronously, need to poll until ready
+            logger.info(f"Option series has {records} records, waiting for file generation...")
+            logger.info(f"  Detail URL: {dl_url}")
+
+            # Poll until status is no longer PENDING (max ~5 minutes)
+            max_polls = 30
+            poll_interval = 10  # seconds
+            for poll in range(max_polls):
+                info = self._api_get_raw(dl_url)
+                if not info:
+                    logger.error("Failed to download detail URL")
+                    return []
+                info_text = info.decode()
+
+                try:
+                    info_data = json.loads(info_text)
+                except json.JSONDecodeError:
+                    # Maybe it's already CSV
+                    if "," in info_text and "\n" in info_text:
+                        logger.info("Got CSV directly")
+                        return self._parse_option_series_csv(info_text)
+                    logger.error("Response is neither JSON nor CSV")
+                    return []
+
+                # Extract status and file info from the response
+                meta_status = None
+                file_info_list = []
+
+                if isinstance(info_data, list) and info_data:
+                    item = info_data[0]
+                    if isinstance(item, dict):
+                        meta = item.get("meta", {})
+                        meta_status = meta.get("status", "")
+                        file_info_list = item.get("data", [])
+                elif isinstance(info_data, dict):
+                    meta = info_data.get("meta", {})
+                    meta_status = meta.get("status", "")
+                    file_info_list = info_data.get("data", [])
+
+                logger.info(f"  Poll {poll + 1}/{max_polls}: status={meta_status}")
+
+                if meta_status and meta_status.upper() == "PENDING":
+                    logger.info(f"  File still being generated, waiting {poll_interval}s...")
+                    time.sleep(poll_interval)
+                    continue
+
+                # Status is no longer PENDING — try to download the file
+                if file_info_list:
+                    for fi in file_info_list:
+                        csv_url = fi.get("urlForDownload")
+                        file_name = fi.get("fileName", "")
+                        file_size = fi.get("fileSize", 0)
+                        logger.info(f"  File: {file_name}, size: {file_size}, url: {csv_url}")
+
+                        if csv_url and file_size > 0:
+                            logger.info(f"  Downloading CSV from: {csv_url}")
+                            compressed = self._api_get_raw(csv_url)
+                            if compressed:
+                                try:
+                                    csv_text = gzip.decompress(compressed).decode()
+                                except Exception:
+                                    csv_text = compressed.decode()
+                                return self._parse_option_series_csv(csv_text)
+                        elif not csv_url and file_name:
+                            # Try constructing download URL from fileName
+                            constructed_url = f"{BASE_URL}/data/download/{file_name}?token={self._get_token()}"
+                            logger.info(f"  No urlForDownload, trying: {constructed_url}")
+                            compressed = self._api_get_raw(constructed_url)
+                            if compressed:
+                                try:
+                                    csv_text = gzip.decompress(compressed).decode()
+                                except Exception:
+                                    csv_text = compressed.decode()
+                                return self._parse_option_series_csv(csv_text)
+
+                # If we got data records directly
+                if isinstance(info_data, dict) and "data" in info_data and isinstance(info_data["data"], list):
+                    if info_data["data"] and isinstance(info_data["data"][0], dict):
+                        if any(k in info_data["data"][0] for k in ("OptionSymbol", "optionSymbol")):
+                            return info_data["data"]
+
+                if isinstance(info_data, list) and info_data:
+                    item = info_data[0]
+                    if isinstance(item, dict) and any(k in item for k in ("OptionSymbol", "optionSymbol")):
+                        return info_data
+
+                logger.error(f"  File not ready or no download URL. Response: {info_text[:500]}")
                 return []
-            info_text = info.decode()
-            logger.info(f"  Detail response length: {len(info_text)} chars")
-            logger.info(f"  Detail response preview: {info_text[:500]}")
 
-            # Try parsing as JSON first
-            try:
-                info_data = json.loads(info_text)
-            except json.JSONDecodeError:
-                # Maybe it's already CSV (plain text)?
-                logger.info("Detail response is not JSON, trying as CSV directly...")
-                if "," in info_text and "\n" in info_text:
-                    return self._parse_option_series_csv(info_text)
-                logger.error("Detail response is neither JSON nor CSV")
-                return []
-
-            # If it's a dict with a data key directly
-            if isinstance(info_data, dict) and "data" in info_data:
-                logger.info(f"  Got dict with 'data' key, {len(info_data['data'])} items")
-                return info_data["data"]
-
-            # If it's a dict with urlForDownload
-            if isinstance(info_data, dict) and "urlForDownload" in info_data:
-                csv_url = info_data["urlForDownload"]
-                logger.info(f"  Got urlForDownload: {csv_url}")
-                compressed = self._api_get_raw(csv_url)
-                if compressed:
-                    try:
-                        csv_text = gzip.decompress(compressed).decode()
-                    except Exception:
-                        csv_text = compressed.decode()
-                    return self._parse_option_series_csv(csv_text)
-
-            # If it's a list (original expected format)
-            if isinstance(info_data, list) and info_data:
-                logger.info(f"  Got list with {len(info_data)} items")
-                logger.info(f"  First item keys: {list(info_data[0].keys()) if isinstance(info_data[0], dict) else type(info_data[0])}")
-                for item in info_data:
-                    if isinstance(item, dict) and "data" in item:
-                        for file_info in item["data"]:
-                            csv_url = file_info.get("urlForDownload")
-                            if csv_url:
-                                logger.info(f"  Downloading CSV from: {csv_url}")
-                                compressed = self._api_get_raw(csv_url)
-                                if compressed:
-                                    try:
-                                        csv_text = gzip.decompress(compressed).decode()
-                                    except Exception:
-                                        csv_text = compressed.decode()
-                                    return self._parse_option_series_csv(csv_text)
-
-                # Maybe the list items ARE the option records themselves
-                if isinstance(info_data[0], dict) and any(
-                    k in info_data[0] for k in ("OptionSymbol", "optionSymbol", "symbol", "optionsymbol")
-                ):
-                    logger.info("  List items appear to be option records directly")
-                    return info_data
+            logger.error(f"  Timed out after {max_polls * poll_interval}s waiting for file generation")
+            return []
 
             logger.error(f"  Could not parse detail response. Type: {type(info_data)}")
             if isinstance(info_data, dict):
