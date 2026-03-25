@@ -521,9 +521,13 @@ def main():
     args = parser.parse_args()
 
     # Validate credentials
+    # If user explicitly passed --username and --password, prefer those over any env API key
+    # (the cloud workspace may have an API_KEY env var that is NOT for the iVolatility REST API)
     username = args.username
     password = args.password
     apikey = args.apikey
+    if username and password:
+        apikey = ""  # force username/password auth when both are provided
     if not apikey and (not username or not password):
         print("ERROR: Credentials required.")
         print("  Option A (cloud): --apikey YOUR_KEY  or set IVOL_APIKEY env var")
