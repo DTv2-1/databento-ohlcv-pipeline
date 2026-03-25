@@ -183,119 +183,115 @@ class IVolatilityClient:
             logger.error(f"Download error: {e}")
             return None
 
-    def get_option_series(self, symbol: str = "SPY") -> list[dict]:
-        """Get all option contracts for a symbol (current trading day)."""
-        logger.info(f"Fetching option series for {symbol}...")
-        result = self._api_get("/equities/option-series", {"symbol": symbol})
+    def get_option_series_on_date(self, symbol: str = "SPY", date: str = "",
+                                  exp_from: str = "", exp_to: str = "") -> list[dict]:
+        """Get option contracts for a symbol on a specific date.
+
+        Uses /equities/eod/option-series-on-date which returns data directly
+        (no async file generation). This is the correct endpoint for historical data.
+        """
+        logger.info(f"Fetching option series for {symbol} on date {date}...")
+        params = {"symbol": symbol}
+        if date:
+            params["date"] = date
+        if exp_from:
+            params["expFrom"] = exp_from
+        if exp_to:
+            params["expTo"] = exp_to
+
+        result = self._api_get("/equities/eod/option-series-on-date", params)
         if not result:
             return []
 
+        # Direct data response
+        if result.get("data"):
+            records = result["data"]
+            logger.info(f"  Got {len(records)} option contracts directly")
+            return records
+
+        # Fallback: check status/urlForDetails pattern
         status = result.get("status", {})
-        records = status.get("recordsFound", 0)
+        records_count = status.get("recordsFound", 0)
         dl_url = status.get("urlForDetails")
 
         if dl_url:
-            # Large result — API generates file asynchronously, need to poll until ready
-            logger.info(f"Option series has {records} records, waiting for file generation...")
-            logger.info(f"  Detail URL: {dl_url}")
+            logger.info(f"  {records_count} records, polling for file...")
+            return self._poll_and_download(dl_url)
 
-            # Poll until status is no longer PENDING (max ~5 minutes)
-            max_polls = 30
-            poll_interval = 10  # seconds
-            for poll in range(max_polls):
-                info = self._api_get_raw(dl_url)
-                if not info:
-                    logger.error("Failed to download detail URL")
-                    return []
-                info_text = info.decode()
+        logger.error(f"  Unexpected response format: {str(result)[:500]}")
+        return []
 
-                try:
-                    info_data = json.loads(info_text)
-                except json.JSONDecodeError:
-                    # Maybe it's already CSV
-                    if "," in info_text and "\n" in info_text:
-                        logger.info("Got CSV directly")
-                        return self._parse_option_series_csv(info_text)
-                    logger.error("Response is neither JSON nor CSV")
-                    return []
+    def _poll_and_download(self, dl_url: str, max_polls: int = 30, poll_interval: int = 10) -> list[dict]:
+        """Poll a detail URL until the async file is ready, then download and parse."""
+        for poll in range(max_polls):
+            info = self._api_get_raw(dl_url)
+            if not info:
+                logger.error("Failed to download detail URL")
+                return []
+            info_text = info.decode()
 
-                # Extract status and file info from the response
-                meta_status = None
-                file_info_list = []
-
-                if isinstance(info_data, list) and info_data:
-                    item = info_data[0]
-                    if isinstance(item, dict):
-                        meta = item.get("meta", {})
-                        meta_status = meta.get("status", "")
-                        file_info_list = item.get("data", [])
-                elif isinstance(info_data, dict):
-                    meta = info_data.get("meta", {})
-                    meta_status = meta.get("status", "")
-                    file_info_list = info_data.get("data", [])
-
-                logger.info(f"  Poll {poll + 1}/{max_polls}: status={meta_status}")
-
-                if meta_status and meta_status.upper() == "PENDING":
-                    logger.info(f"  File still being generated, waiting {poll_interval}s...")
-                    time.sleep(poll_interval)
-                    continue
-
-                # Status is no longer PENDING — try to download the file
-                if file_info_list:
-                    for fi in file_info_list:
-                        csv_url = fi.get("urlForDownload")
-                        file_name = fi.get("fileName", "")
-                        file_size = fi.get("fileSize", 0)
-                        logger.info(f"  File: {file_name}, size: {file_size}, url: {csv_url}")
-
-                        if csv_url and file_size > 0:
-                            logger.info(f"  Downloading CSV from: {csv_url}")
-                            compressed = self._api_get_raw(csv_url)
-                            if compressed:
-                                try:
-                                    csv_text = gzip.decompress(compressed).decode()
-                                except Exception:
-                                    csv_text = compressed.decode()
-                                return self._parse_option_series_csv(csv_text)
-                        elif not csv_url and file_name:
-                            # Try constructing download URL from fileName
-                            constructed_url = f"{BASE_URL}/data/download/{file_name}?token={self._get_token()}"
-                            logger.info(f"  No urlForDownload, trying: {constructed_url}")
-                            compressed = self._api_get_raw(constructed_url)
-                            if compressed:
-                                try:
-                                    csv_text = gzip.decompress(compressed).decode()
-                                except Exception:
-                                    csv_text = compressed.decode()
-                                return self._parse_option_series_csv(csv_text)
-
-                # If we got data records directly
-                if isinstance(info_data, dict) and "data" in info_data and isinstance(info_data["data"], list):
-                    if info_data["data"] and isinstance(info_data["data"][0], dict):
-                        if any(k in info_data["data"][0] for k in ("OptionSymbol", "optionSymbol")):
-                            return info_data["data"]
-
-                if isinstance(info_data, list) and info_data:
-                    item = info_data[0]
-                    if isinstance(item, dict) and any(k in item for k in ("OptionSymbol", "optionSymbol")):
-                        return info_data
-
-                logger.error(f"  File not ready or no download URL. Response: {info_text[:500]}")
+            try:
+                info_data = json.loads(info_text)
+            except json.JSONDecodeError:
+                if "," in info_text and "\n" in info_text:
+                    return self._parse_option_series_csv(info_text)
+                logger.error("Response is neither JSON nor CSV")
                 return []
 
-            logger.error(f"  Timed out after {max_polls * poll_interval}s waiting for file generation")
+            # Extract status
+            meta_status = None
+            file_info_list = []
+            if isinstance(info_data, list) and info_data:
+                item = info_data[0]
+                if isinstance(item, dict):
+                    meta_status = item.get("meta", {}).get("status", "")
+                    file_info_list = item.get("data", [])
+            elif isinstance(info_data, dict):
+                meta_status = info_data.get("meta", {}).get("status", "")
+                file_info_list = info_data.get("data", [])
+
+            logger.info(f"  Poll {poll + 1}/{max_polls}: status={meta_status}")
+
+            if meta_status and meta_status.upper() == "PENDING":
+                logger.info(f"  File still being generated, waiting {poll_interval}s...")
+                time.sleep(poll_interval)
+                continue
+
+            # Try to download
+            for fi in file_info_list:
+                csv_url = fi.get("urlForDownload")
+                file_name = fi.get("fileName", "")
+                file_size = fi.get("fileSize", 0)
+                if csv_url and file_size > 0:
+                    logger.info(f"  Downloading: {csv_url}")
+                    compressed = self._api_get_raw(csv_url)
+                    if compressed:
+                        try:
+                            csv_text = gzip.decompress(compressed).decode()
+                        except Exception:
+                            csv_text = compressed.decode()
+                        return self._parse_option_series_csv(csv_text)
+                elif file_name:
+                    constructed_url = f"{BASE_URL}/data/download/{file_name}?token={self._get_token()}"
+                    logger.info(f"  Trying constructed URL: {constructed_url}")
+                    compressed = self._api_get_raw(constructed_url)
+                    if compressed:
+                        try:
+                            csv_text = gzip.decompress(compressed).decode()
+                        except Exception:
+                            csv_text = compressed.decode()
+                        return self._parse_option_series_csv(csv_text)
+
+            # Maybe data is inline
+            if isinstance(info_data, dict) and "data" in info_data:
+                if isinstance(info_data["data"], list) and info_data["data"]:
+                    if isinstance(info_data["data"][0], dict):
+                        return info_data["data"]
+
+            logger.error(f"  File not ready. Response: {info_text[:500]}")
             return []
 
-            logger.error(f"  Could not parse detail response. Type: {type(info_data)}")
-            if isinstance(info_data, dict):
-                logger.error(f"  Keys: {list(info_data.keys())}")
-            return []
-
-        elif result.get("data"):
-            return result["data"]
-
-        logger.error("No download URL and no inline data in response")
+        logger.error(f"  Timed out after {max_polls * poll_interval}s")
         return []
 
     def _parse_option_series_csv(self, csv_text: str) -> list[dict]:
@@ -553,12 +549,13 @@ def get_option_symbols_for_period(
 ) -> list[str]:
     """Get option symbols that were active during a date range.
 
-    Uses the option-series endpoint which returns current contracts.
+    Uses /equities/eod/option-series-on-date which returns contracts that existed
+    on a specific trading day. We query using the first date of the range.
     Returns full chain — all strikes, all expiries (per Pete's spec).
     Only filters out contracts that expired before the pull range.
     """
-    # Fetch option series
-    series = client.get_option_series("SPY")
+    # Use option-series-on-date with the first date of the range
+    series = client.get_option_series_on_date("SPY", date=date_from)
     if not series:
         logger.error("Could not fetch option series")
         return []
