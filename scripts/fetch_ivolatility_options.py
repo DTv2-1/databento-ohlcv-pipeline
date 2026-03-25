@@ -197,23 +197,77 @@ class IVolatilityClient:
         if dl_url:
             # Large result — need to download CSV
             logger.info(f"Option series has {records} records, downloading...")
+            logger.info(f"  Download URL: {dl_url}")
             info = self._api_get_raw(dl_url)
             if not info:
+                logger.error("Failed to download detail URL")
                 return []
-            info_data = json.loads(info.decode())
+            info_text = info.decode()
+            logger.info(f"  Detail response length: {len(info_text)} chars")
+            logger.info(f"  Detail response preview: {info_text[:500]}")
+
+            # Try parsing as JSON first
+            try:
+                info_data = json.loads(info_text)
+            except json.JSONDecodeError:
+                # Maybe it's already CSV (plain text)?
+                logger.info("Detail response is not JSON, trying as CSV directly...")
+                if "," in info_text and "\n" in info_text:
+                    return self._parse_option_series_csv(info_text)
+                logger.error("Detail response is neither JSON nor CSV")
+                return []
+
+            # If it's a dict with a data key directly
+            if isinstance(info_data, dict) and "data" in info_data:
+                logger.info(f"  Got dict with 'data' key, {len(info_data['data'])} items")
+                return info_data["data"]
+
+            # If it's a dict with urlForDownload
+            if isinstance(info_data, dict) and "urlForDownload" in info_data:
+                csv_url = info_data["urlForDownload"]
+                logger.info(f"  Got urlForDownload: {csv_url}")
+                compressed = self._api_get_raw(csv_url)
+                if compressed:
+                    try:
+                        csv_text = gzip.decompress(compressed).decode()
+                    except Exception:
+                        csv_text = compressed.decode()
+                    return self._parse_option_series_csv(csv_text)
+
+            # If it's a list (original expected format)
             if isinstance(info_data, list) and info_data:
+                logger.info(f"  Got list with {len(info_data)} items")
+                logger.info(f"  First item keys: {list(info_data[0].keys()) if isinstance(info_data[0], dict) else type(info_data[0])}")
                 for item in info_data:
-                    if "data" in item:
+                    if isinstance(item, dict) and "data" in item:
                         for file_info in item["data"]:
                             csv_url = file_info.get("urlForDownload")
                             if csv_url:
+                                logger.info(f"  Downloading CSV from: {csv_url}")
                                 compressed = self._api_get_raw(csv_url)
                                 if compressed:
-                                    csv_text = gzip.decompress(compressed).decode()
+                                    try:
+                                        csv_text = gzip.decompress(compressed).decode()
+                                    except Exception:
+                                        csv_text = compressed.decode()
                                     return self._parse_option_series_csv(csv_text)
+
+                # Maybe the list items ARE the option records themselves
+                if isinstance(info_data[0], dict) and any(
+                    k in info_data[0] for k in ("OptionSymbol", "optionSymbol", "symbol", "optionsymbol")
+                ):
+                    logger.info("  List items appear to be option records directly")
+                    return info_data
+
+            logger.error(f"  Could not parse detail response. Type: {type(info_data)}")
+            if isinstance(info_data, dict):
+                logger.error(f"  Keys: {list(info_data.keys())}")
+            return []
+
         elif result.get("data"):
             return result["data"]
 
+        logger.error("No download URL and no inline data in response")
         return []
 
     def _parse_option_series_csv(self, csv_text: str) -> list[dict]:
