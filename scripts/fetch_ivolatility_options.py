@@ -42,6 +42,7 @@ from pathlib import Path
 BASE_URL = "https://restapi.ivolatility.com"
 USERNAME = os.environ.get("IVOL_USERNAME", "")
 PASSWORD = os.environ.get("IVOL_PASSWORD", "")
+APIKEY = os.environ.get("IVOL_APIKEY", os.environ.get("API_KEY", ""))
 
 # Rate limiting (configurable)
 REQUEST_DELAY = 0.2          # seconds between API calls
@@ -90,16 +91,29 @@ logger.addHandler(error_handler)
 class IVolatilityClient:
     """REST API client for iVolatility."""
 
-    def __init__(self, username: str, password: str, delay: float = REQUEST_DELAY):
+    def __init__(self, username: str = "", password: str = "", delay: float = REQUEST_DELAY, apikey: str = ""):
         self.username = username
         self.password = password
+        self.apikey = apikey
         self.delay = delay
         self.token = None
         self.token_ts = 0
         self.request_count = 0
 
     def _get_token(self) -> str:
-        """Get or refresh auth token."""
+        """Get or refresh auth token.
+
+        If apikey is provided (cloud workspace), use it directly as token.
+        Otherwise, authenticate with username/password.
+        """
+        # Cloud workspace: API key IS the token
+        if self.apikey:
+            if not self.token:
+                self.token = self.apikey
+                self.token_ts = time.time()
+                logger.info("Using API key as token (cloud workspace mode)")
+            return self.token
+
         now = time.time()
         if self.token and (now - self.token_ts) < TOKEN_REFRESH_INTERVAL:
             return self.token
@@ -259,6 +273,31 @@ def generate_trading_weeks(date_from: str, date_to: str) -> list[tuple[str, str]
         current += timedelta(days=7)
 
     return weeks
+
+
+def generate_monthly_blocks(date_from: str, date_to: str) -> list[tuple[str, str]]:
+    """Generate month-sized blocks (1st to last day of month).
+
+    Each block produces one CSV file. Blocks auto-clip to date_from/date_to.
+    """
+    from calendar import monthrange
+    start = datetime.strptime(date_from, "%Y-%m-%d")
+    end = datetime.strptime(date_to, "%Y-%m-%d")
+
+    blocks = []
+    current = start.replace(day=1)  # start at 1st of month
+    while current <= end:
+        month_start = max(current, start)
+        _, last_day = monthrange(current.year, current.month)
+        month_end = min(current.replace(day=last_day), end)
+        blocks.append((month_start.strftime("%Y-%m-%d"), month_end.strftime("%Y-%m-%d")))
+        # advance to 1st of next month
+        if current.month == 12:
+            current = current.replace(year=current.year + 1, month=1, day=1)
+        else:
+            current = current.replace(month=current.month + 1, day=1)
+
+    return blocks
 
 
 def get_output_file(date_from: str, date_to: str) -> Path:
@@ -475,15 +514,20 @@ def main():
     parser.add_argument("--to", dest="date_to", help="End date (YYYY-MM-DD)")
     parser.add_argument("--delay", type=float, default=REQUEST_DELAY, help="Delay between requests (seconds)")
     parser.add_argument("--dry-run", action="store_true", help="Show plan without executing")
+    parser.add_argument("--monthly", action="store_true", help="Split into monthly CSVs (1 file per month, auto-continues)")
     parser.add_argument("--username", default=USERNAME, help="iVolatility username (or set IVOL_USERNAME env var)")
     parser.add_argument("--password", default=PASSWORD, help="iVolatility password (or set IVOL_PASSWORD env var)")
+    parser.add_argument("--apikey", default=APIKEY, help="iVolatility API key (cloud workspace; or set IVOL_APIKEY env var)")
     args = parser.parse_args()
 
     # Validate credentials
     username = args.username
     password = args.password
-    if not username or not password:
-        print("ERROR: Credentials required. Use --username/--password or set IVOL_USERNAME/IVOL_PASSWORD env vars.")
+    apikey = args.apikey
+    if not apikey and (not username or not password):
+        print("ERROR: Credentials required.")
+        print("  Option A (cloud): --apikey YOUR_KEY  or set IVOL_APIKEY env var")
+        print("  Option B (local): --username USER --password PASS  or set IVOL_USERNAME/IVOL_PASSWORD env vars")
         sys.exit(1)
 
     # Determine date range
@@ -507,7 +551,7 @@ def main():
     logger.info("=" * 70)
 
     # Initialize client
-    client = IVolatilityClient(username, password, delay=args.delay)
+    client = IVolatilityClient(username=username, password=password, delay=args.delay, apikey=apikey)
 
     # Step 1: Get option symbols
     logger.info("Step 1: Fetching option series...")
@@ -516,42 +560,153 @@ def main():
         logger.error("No option symbols found. Exiting.")
         sys.exit(1)
 
-    # Step 2: Generate week blocks
+    # Step 2: Generate time blocks
+    if args.monthly:
+        months = generate_monthly_blocks(date_from, date_to)
+        logger.info(f"Step 2: {len(months)} monthly blocks to pull (1 CSV per month)")
+    else:
+        months = None
+
     weeks = generate_trading_weeks(date_from, date_to)
-    logger.info(f"Step 2: {len(weeks)} weeks to pull")
+    if not args.monthly:
+        logger.info(f"Step 2: {len(weeks)} weeks to pull")
 
     if args.dry_run:
-        logger.info("DRY RUN — would pull:")
-        for i, (wf, wt) in enumerate(weeks):
-            logger.info(f"  Week {i+1}: {wf} to {wt}")
-        logger.info(f"  {len(option_symbols)} contracts × {len(weeks)} weeks")
-        logger.info(f"  ≈ {len(option_symbols) * len(weeks)} API calls")
-        est_time = len(option_symbols) * len(weeks) * args.delay / 60
-        logger.info(f"  Estimated time: {est_time:.0f} minutes")
+        if args.monthly:
+            logger.info("DRY RUN — monthly mode, would pull:")
+            for i, (mf, mt) in enumerate(months):
+                m_weeks = generate_trading_weeks(mf, mt)
+                logger.info(f"  Month {i+1}: {mf} to {mt} ({len(m_weeks)} weeks)")
+            total_weeks = sum(len(generate_trading_weeks(mf, mt)) for mf, mt in months)
+            logger.info(f"  {len(option_symbols)} contracts × {total_weeks} weeks")
+            logger.info(f"  ≈ {len(option_symbols) * total_weeks} API calls")
+            est_time = len(option_symbols) * total_weeks * args.delay / 60
+            logger.info(f"  Estimated time: {est_time:.0f} minutes ({est_time/60:.1f} hours)")
+        else:
+            logger.info("DRY RUN — would pull:")
+            for i, (wf, wt) in enumerate(weeks):
+                logger.info(f"  Week {i+1}: {wf} to {wt}")
+            logger.info(f"  {len(option_symbols)} contracts × {len(weeks)} weeks")
+            logger.info(f"  ≈ {len(option_symbols) * len(weeks)} API calls")
+            est_time = len(option_symbols) * len(weeks) * args.delay / 60
+            logger.info(f"  Estimated time: {est_time:.0f} minutes")
         return
 
-    # Step 3: Pull each week
+    # Step 3: Pull data
     total_rows = 0
     total_errors = 0
     start_time = time.time()
 
-    for i, (week_from, week_to) in enumerate(weeks, 1):
-        logger.info(f"\n{'─'*50}")
-        logger.info(f"Week {i}/{len(weeks)}: {week_from} to {week_to}")
+    if args.monthly:
+        # ── Monthly mode: pull each month, all weeks merged into 1 CSV per month ──
+        for m_idx, (month_from, month_to) in enumerate(months, 1):
+            month_label = month_from[:7]  # e.g. "2024-03"
+            month_file = OUTPUT_DIR / f"SPY_options_{month_label}.csv"
 
-        rows, errors = pull_week(
-            client, option_symbols, week_from, week_to,
-            progress_current=i, progress_total=len(weeks),
-        )
-        total_rows += rows
-        total_errors += errors
+            logger.info(f"\n{'═'*60}")
+            logger.info(f"MONTH {m_idx}/{len(months)}: {month_label} ({month_from} to {month_to})")
+            logger.info(f"  Output: {month_file.name}")
+            logger.info(f"{'═'*60}")
 
-        elapsed = time.time() - start_time
-        rate = total_rows / elapsed if elapsed > 0 else 0
-        logger.info(
-            f"Running total: {total_rows} rows, {total_errors} errors, "
-            f"{elapsed/60:.1f} min elapsed, {rate:.0f} rows/sec"
-        )
+            # Check if month is already complete
+            month_ckpt = OUTPUT_DIR / f".checkpoint_month_{month_label}.json"
+            if month_file.exists() and not month_ckpt.exists():
+                with open(month_file) as mf:
+                    existing_rows = sum(1 for _ in mf) - 1
+                if existing_rows > 0:
+                    logger.info(f"⏭  Skipping {month_label} — already complete ({existing_rows} rows)")
+                    total_rows += existing_rows
+                    continue
+
+            m_weeks = generate_trading_weeks(month_from, month_to)
+            month_rows = 0
+            month_errors = 0
+
+            # Load month checkpoint (tracks which week we're on)
+            month_start_week = 0
+            if month_ckpt.exists():
+                try:
+                    with open(month_ckpt) as mc:
+                        mck = json.load(mc)
+                    month_start_week = mck.get("completed_weeks", 0)
+                    month_rows = mck.get("rows", 0)
+                    month_errors = mck.get("errors", 0)
+                    logger.info(f"🔄 Resuming month {month_label} from week {month_start_week + 1}")
+                except Exception:
+                    pass
+
+            # Open month CSV (append if resuming, write if fresh)
+            file_mode = "a" if month_start_week > 0 and month_file.exists() else "w"
+            with open(month_file, file_mode, newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
+                if file_mode == "w":
+                    writer.writeheader()
+
+                for w_idx in range(month_start_week, len(m_weeks)):
+                    week_from, week_to = m_weeks[w_idx]
+                    logger.info(f"\n{'─'*50}")
+                    logger.info(f"  Week {w_idx + 1}/{len(m_weeks)}: {week_from} to {week_to}")
+
+                    # Pull week data directly into the month CSV
+                    week_rows = 0
+                    week_errors = 0
+                    for i, opt_sym in enumerate(option_symbols):
+                        if (i + 1) % 500 == 0 or i == 0:
+                            logger.info(
+                                f"    [{i+1}/{len(option_symbols)}] {month_rows + week_rows} rows "
+                                f"[Week {w_idx+1}/{len(m_weeks)}]"
+                            )
+                        elif (i + 1) % 50 == 0:
+                            print(f"    ... {i+1}/{len(option_symbols)} ({month_rows + week_rows} rows)", end="\r")
+
+                        try:
+                            records = client.get_single_option_rawiv(opt_sym, week_from, week_to)
+                            for rec in records:
+                                writer.writerow(flatten_record(rec))
+                                week_rows += 1
+                            f.flush()
+                        except Exception as e:
+                            week_errors += 1
+                            logger.error(f"    Error on {opt_sym.strip()}: {e}")
+
+                    month_rows += week_rows
+                    month_errors += week_errors
+
+                    # Save month checkpoint after each week
+                    with open(month_ckpt, "w") as mc:
+                        json.dump({"completed_weeks": w_idx + 1, "rows": month_rows, "errors": month_errors}, mc)
+                    logger.info(f"  ✓ Week done: +{week_rows} rows (month total: {month_rows})")
+
+            # Month done — clean up checkpoint
+            if month_ckpt.exists():
+                month_ckpt.unlink()
+            total_rows += month_rows
+            total_errors += month_errors
+
+            elapsed = time.time() - start_time
+            size_kb = month_file.stat().st_size / 1024
+            logger.info(f"\n✅ Month {month_label} complete: {month_rows} rows, {month_errors} errors ({size_kb:.0f} KB)")
+            logger.info(f"   Overall progress: {total_rows} rows, {elapsed/60:.1f} min elapsed")
+            logger.info(f"   Months remaining: {len(months) - m_idx}")
+    else:
+        # ── Original weekly mode ──
+        for i, (week_from, week_to) in enumerate(weeks, 1):
+            logger.info(f"\n{'─'*50}")
+            logger.info(f"Week {i}/{len(weeks)}: {week_from} to {week_to}")
+
+            rows, errors = pull_week(
+                client, option_symbols, week_from, week_to,
+                progress_current=i, progress_total=len(weeks),
+            )
+            total_rows += rows
+            total_errors += errors
+
+            elapsed = time.time() - start_time
+            rate = total_rows / elapsed if elapsed > 0 else 0
+            logger.info(
+                f"Running total: {total_rows} rows, {total_errors} errors, "
+                f"{elapsed/60:.1f} min elapsed, {rate:.0f} rows/sec"
+            )
 
     # Summary
     elapsed = time.time() - start_time
