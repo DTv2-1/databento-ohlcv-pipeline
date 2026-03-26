@@ -1,9 +1,10 @@
-# iVolatility SPY Options Data Pull
+# iVolatility Options Data Pull
 
 ## Overview
 
-Script to download historical SPY options EOD data (price, IV, greeks) from the iVolatility REST API via their VS Code Cloud Workspace.
+Script to download historical options EOD data (price, IV, greeks) from the iVolatility REST API via their VS Code Cloud Workspace. Supports any equity symbol (SPY, AAPL, QQQ, TSLA, etc.).
 
+**Default symbol:** SPY  
 **Date range:** March 2024 – February 2026 (24 months)  
 **Output:** 1 CSV per month, ~50K+ rows each  
 **Estimated time:** ~3.5 hours per month, runs unattended  
@@ -50,6 +51,7 @@ python3 scripts/fetch_ivolatility_options.py --full --monthly --username realpet
 
 | Command | What it does |
 |---------|-------------|
+| `--symbol TICKER` | Symbol to pull (default: SPY). Examples: AAPL, QQQ, TSLA |
 | `--full` | Pull Mar 2024 – Feb 2026 |
 | `--monthly` | Save 1 CSV per month, auto-continue to next month |
 | `--from YYYY-MM-DD --to YYYY-MM-DD` | Custom date range |
@@ -60,14 +62,20 @@ python3 scripts/fetch_ivolatility_options.py --full --monthly --username realpet
 ### Examples
 
 ```bash
+# Full SPY pull — Mar 2024 to Feb 2026, one CSV per month
+python3 scripts/fetch_ivolatility_options.py --full --monthly --username realpetedavis --password '!EatzC8cLKHUf@jf'
+
+# Pull AAPL options for a custom date range
+python3 scripts/fetch_ivolatility_options.py --symbol AAPL --from 2024-03-01 --to 2024-12-31 --monthly --username realpetedavis --password '!EatzC8cLKHUf@jf'
+
 # Dry run — see the plan without downloading
 python3 scripts/fetch_ivolatility_options.py --full --monthly --dry-run --username realpetedavis --password '!EatzC8cLKHUf@jf'
 
-# Pull just one month
+# Pull just one month of SPY
 python3 scripts/fetch_ivolatility_options.py --from 2024-03-01 --to 2024-03-31 --username realpetedavis --password '!EatzC8cLKHUf@jf'
 
-# Full 2-year pull with monthly CSVs
-python3 scripts/fetch_ivolatility_options.py --full --monthly --username realpetedavis --password '!EatzC8cLKHUf@jf'
+# Pull QQQ for 6 months
+python3 scripts/fetch_ivolatility_options.py --symbol QQQ --from 2024-06-01 --to 2024-12-31 --monthly --username realpetedavis --password '!EatzC8cLKHUf@jf'
 ```
 
 ---
@@ -79,11 +87,12 @@ CSVs are saved to:
 ~/databento-ohlcv-pipeline/data/options/ivolatility/
 ```
 
-Files are named:
+Files are named by symbol and month:
 ```
 SPY_options_2024-03.csv
 SPY_options_2024-04.csv
-SPY_options_2024-05.csv
+AAPL_options_2024-03.csv
+QQQ_options_2024-06.csv
 ...
 ```
 

@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
 """
-iVolatility SPY Options Data Pull
-==================================
-Pulls historical EOD SPY options chain data from iVolatility REST API.
+iVolatility Options Data Pull
+================================
+Pulls historical EOD options chain data from iVolatility REST API.
+Supports any equity symbol (SPY, AAPL, QQQ, TSLA, etc.).
 
 Data includes: price, bid, ask, IV, delta, gamma, vega, theta, rho,
                volume, open interest per contract per trading day.
 
 Architecture:
   1. Get auth token
-  2. Fetch full option series (all SPY contracts) for each date range
+  2. Fetch full option series (all contracts for the symbol) for each date range
   3. For each option symbol, pull EOD raw-IV data via single-stock-option-raw-iv
   4. Save to CSV with resume capability
 
 Usage:
-  python3 fetch_ivolatility_options.py                    # Run test week
-  python3 fetch_ivolatility_options.py --full              # Run full 2-year pull
-  python3 fetch_ivolatility_options.py --from 2025-01-01 --to 2025-03-31  # Custom range
+  python3 fetch_ivolatility_options.py                                     # Test week (SPY)
+  python3 fetch_ivolatility_options.py --full --monthly                     # Full 2yr, 1 CSV/month
+  python3 fetch_ivolatility_options.py --symbol AAPL --from 2024-03-01 --to 2024-12-31 --monthly
+  python3 fetch_ivolatility_options.py --from 2024-03-01 --to 2024-03-31    # Single month
 
 Author: DataBento Pipeline
 Date: March 2026
@@ -378,9 +380,9 @@ def generate_monthly_blocks(date_from: str, date_to: str) -> list[tuple[str, str
     return blocks
 
 
-def get_output_file(date_from: str, date_to: str) -> Path:
+def get_output_file(date_from: str, date_to: str, symbol: str = "SPY") -> Path:
     """Get output CSV path for a date range."""
-    return OUTPUT_DIR / f"SPY_options_{date_from}_to_{date_to}.csv"
+    return OUTPUT_DIR / f"{symbol}_options_{date_from}_to_{date_to}.csv"
 
 
 def file_already_complete(filepath: Path) -> bool:
@@ -459,6 +461,7 @@ def pull_week(
     date_to: str,
     progress_current: int = 0,
     progress_total: int = 0,
+    symbol: str = "SPY",
 ) -> tuple[int, int]:
     """Pull one week of data for all option symbols.
 
@@ -467,7 +470,7 @@ def pull_week(
 
     Returns (rows_saved, errors).
     """
-    output_file = get_output_file(date_from, date_to)
+    output_file = get_output_file(date_from, date_to, symbol=symbol)
     ckpt = load_checkpoint(date_from, date_to)
 
     # If file is complete AND no checkpoint (meaning it finished cleanly), skip
@@ -546,6 +549,7 @@ def get_option_symbols_for_period(
     client: IVolatilityClient,
     date_from: str,
     date_to: str,
+    symbol: str = "SPY",
 ) -> list[str]:
     """Get option symbols that were active during a date range.
 
@@ -555,7 +559,7 @@ def get_option_symbols_for_period(
     Only filters out contracts that expired before the pull range.
     """
     # Use option-series-on-date with the first date of the range
-    series = client.get_option_series_on_date("SPY", date=date_from)
+    series = client.get_option_series_on_date(symbol, date=date_from)
     if not series:
         logger.error("Could not fetch option series")
         return []
@@ -587,7 +591,8 @@ def get_option_symbols_for_period(
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="iVolatility SPY Options Data Pull")
+    parser = argparse.ArgumentParser(description="iVolatility Options Data Pull")
+    parser.add_argument("--symbol", default="SPY", help="Underlying symbol (default: SPY). Examples: SPY, AAPL, QQQ, TSLA")
     parser.add_argument("--full", action="store_true", help="Full 2-year pull (Mar 2024 — Feb 2026)")
     parser.add_argument("--from", dest="date_from", help="Start date (YYYY-MM-DD)")
     parser.add_argument("--to", dest="date_to", help="End date (YYYY-MM-DD)")
@@ -625,8 +630,11 @@ def main():
         date_from = "2026-03-09"
         date_to = "2026-03-13"
 
+    symbol = args.symbol.upper()
+
     logger.info("=" * 70)
-    logger.info("iVolatility SPY Options Data Pull")
+    logger.info(f"iVolatility {symbol} Options Data Pull")
+    logger.info(f"  Symbol: {symbol}")
     logger.info(f"  Date range: {date_from} to {date_to}")
     logger.info(f"  Delay: {args.delay}s between requests")
     logger.info(f"  Output: {OUTPUT_DIR}")
@@ -638,7 +646,7 @@ def main():
 
     # Step 1: Get option symbols
     logger.info("Step 1: Fetching option series...")
-    option_symbols = get_option_symbols_for_period(client, date_from, date_to)
+    option_symbols = get_option_symbols_for_period(client, date_from, date_to, symbol=symbol)
     if not option_symbols:
         logger.error("No option symbols found. Exiting.")
         sys.exit(1)
@@ -684,7 +692,7 @@ def main():
         # ── Monthly mode: pull each month, all weeks merged into 1 CSV per month ──
         for m_idx, (month_from, month_to) in enumerate(months, 1):
             month_label = month_from[:7]  # e.g. "2024-03"
-            month_file = OUTPUT_DIR / f"SPY_options_{month_label}.csv"
+            month_file = OUTPUT_DIR / f"{symbol}_options_{month_label}.csv"
 
             logger.info(f"\n{'═'*60}")
             logger.info(f"MONTH {m_idx}/{len(months)}: {month_label} ({month_from} to {month_to})")
@@ -780,6 +788,7 @@ def main():
             rows, errors = pull_week(
                 client, option_symbols, week_from, week_to,
                 progress_current=i, progress_total=len(weeks),
+                symbol=symbol,
             )
             total_rows += rows
             total_errors += errors
@@ -803,7 +812,7 @@ def main():
     logger.info("=" * 70)
 
     # List output files
-    csv_files = sorted(OUTPUT_DIR.glob("SPY_options_*.csv"))
+    csv_files = sorted(OUTPUT_DIR.glob(f"{symbol}_options_*.csv"))
     for f in csv_files:
         size_kb = f.stat().st_size / 1024
         logger.info(f"  📄 {f.name} ({size_kb:.1f} KB)")
