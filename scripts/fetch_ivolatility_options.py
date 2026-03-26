@@ -47,7 +47,7 @@ PASSWORD = os.environ.get("IVOL_PASSWORD", "")
 APIKEY = os.environ.get("IVOL_APIKEY", os.environ.get("API_KEY", ""))
 
 # Rate limiting (configurable)
-REQUEST_DELAY = 0.2          # seconds between API calls
+REQUEST_DELAY = 1.5          # seconds between API calls (free trial needs ~1.5s+)
 TOKEN_REFRESH_INTERVAL = 1500  # seconds before refreshing token (25 min, token expires in 30)
 
 # Directories
@@ -131,7 +131,7 @@ class IVolatilityClient:
             logger.info("Token refreshed successfully")
         return self.token
 
-    def _api_get(self, path: str, params: dict, retries: int = 3) -> dict | None:
+    def _api_get(self, path: str, params: dict, retries: int = 5) -> dict | None:
         """Make GET request with retries and rate limiting."""
         params["token"] = self._get_token()
         url = f"{BASE_URL}{path}?" + urllib.parse.urlencode(params)
@@ -156,8 +156,13 @@ class IVolatilityClient:
                     logger.error(f"403 Forbidden: {body}")
                     return None
                 if e.code == 429:  # Rate limited
-                    wait = (attempt + 1) * 10
-                    logger.warning(f"Rate limited, waiting {wait}s...")
+                    wait = (attempt + 1) * 15
+                    # Auto-increase delay to avoid future rate limits
+                    if self.delay < 3.0:
+                        self.delay = min(self.delay + 0.5, 3.0)
+                        logger.warning(f"Rate limited, waiting {wait}s... (increased delay to {self.delay}s)")
+                    else:
+                        logger.warning(f"Rate limited, waiting {wait}s...")
                     time.sleep(wait)
                     continue
                 logger.error(f"HTTP {e.code} on {path}: {body}")
